@@ -2489,7 +2489,14 @@ public class DeltaLakeMetadata
         String sourceTableName;
         try {
             // The clone commit is the first commit of the cloned table, so set the endVersion to 0
-            TransactionLogTail transactionLogTail = loadNewTail(fileSystem, handle.getLocation(), Optional.empty(), Optional.of(0L), DataSize.ofBytes(0));
+            TransactionLogTail transactionLogTail = null;
+
+            try {
+                transactionLogTail = loadNewTail(fileSystem, handle.getLocation(), Optional.empty(), Optional.of(0L), DataSize.ofBytes(0));
+            }
+            catch (Exception e) {
+                return Optional.empty();
+            }
             List<Transaction> transactions = transactionLogTail.getTransactions();
             if (transactions.isEmpty()) {
                 return Optional.empty();
@@ -2510,7 +2517,7 @@ public class DeltaLakeMetadata
                 throw new TrinoException(NOT_SUPPORTED, "Not support reading source table for cloned table with null source table name");
             }
         }
-        catch (IOException e) {
+        catch (Exception e) {
             throw new RuntimeException(e);
         }
 
