@@ -88,6 +88,7 @@ import io.trino.spi.block.MapBlock;
 import io.trino.spi.block.SqlMap;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.JoinCondition;
@@ -407,12 +408,28 @@ public class PostgreSqlClient
     {
         checkArgument(tableMetadata.getProperties().isEmpty(), "Unsupported table properties: %s", tableMetadata.getProperties());
         ImmutableList.Builder<String> createTableSqlsBuilder = ImmutableList.builder();
-        createTableSqlsBuilder.add(format("CREATE TABLE %s (%s)", quoted(remoteTableName), join(", ", columns)));
+        String tableName = remoteTableName.toString().toLowerCase();
+        String createTableSql;
+        if (tableName.contains("tmp_trino_")) {
+            createTableSql = "CREATE UNLOGGED TABLE %s (%s)";
+        }
+        else {
+            createTableSql = "CREATE TABLE %s (%s)";
+        }
+        createTableSqlsBuilder.add(format(createTableSql, quoted(remoteTableName), join(", ", columns)));
         Optional<String> tableComment = tableMetadata.getComment();
         if (tableComment.isPresent()) {
             createTableSqlsBuilder.add(buildTableCommentSql(remoteTableName, tableComment));
         }
         return createTableSqlsBuilder.build();
+    }
+
+    @Override
+    protected String createPageSinkIdsTableSql(ConnectorSession session, RemoteTableName pageSinkTable, String pageSinkIdColumnName)
+    {
+        return format("CREATE UNLOGGED TABLE %s (%s)",
+                quoted(pageSinkTable),
+                getColumnDefinitionSql(session, new ColumnMetadata(pageSinkIdColumnName, TRINO_PAGE_SINK_ID_COLUMN_TYPE), pageSinkIdColumnName));
     }
 
     @Override
@@ -1997,4 +2014,23 @@ public class PostgreSqlClient
             requireNonNull(averageColumnLength, "averageColumnLength is null");
         }
     }
+
+    @Override
+    protected void copyTableSchema(ConnectorSession session, Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
+    {
+        String sql = format(
+                "CREATE UNLOGGED TABLE %s AS SELECT %s FROM %s WHERE 0 = 1",
+                quoted(catalogName, schemaName, newTableName),
+                columnNames.stream()
+                        .map(this::quoted)
+                        .collect(joining(", ")),
+                quoted(catalogName, schemaName, tableName));
+        try {
+            execute(session, connection, sql);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
 }
