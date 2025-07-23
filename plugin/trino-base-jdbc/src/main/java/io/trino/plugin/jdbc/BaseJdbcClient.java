@@ -118,7 +118,7 @@ public abstract class BaseJdbcClient
 {
     private static final Logger log = Logger.get(BaseJdbcClient.class);
 
-    static final Type TRINO_PAGE_SINK_ID_COLUMN_TYPE = BigintType.BIGINT;
+    protected static final Type TRINO_PAGE_SINK_ID_COLUMN_TYPE = BigintType.BIGINT;
 
     protected final ConnectionFactory connectionFactory;
     protected final QueryBuilder queryBuilder;
@@ -1121,9 +1121,7 @@ public abstract class BaseJdbcClient
 
         String pageSinkIdColumnName = handle.getPageSinkIdColumnName().get();
 
-        String pageSinkTableSql = format("CREATE TABLE %s (%s)",
-                quoted(pageSinkTable),
-                getColumnDefinitionSql(session, new ColumnMetadata(pageSinkIdColumnName, TRINO_PAGE_SINK_ID_COLUMN_TYPE), pageSinkIdColumnName));
+        String pageSinkTableSql = createPageSinkIdsTableSql(session, pageSinkTable, pageSinkIdColumnName);
         String pageSinkInsertSql = format("INSERT INTO %s (%s) VALUES (?)",
                 quoted(pageSinkTable),
                 pageSinkIdColumnName);
@@ -1152,6 +1150,13 @@ public abstract class BaseJdbcClient
         }
 
         return pageSinkTable;
+    }
+
+    protected String createPageSinkIdsTableSql(ConnectorSession session, RemoteTableName pageSinkTable, String pageSinkIdColumnName)
+    {
+        return format("CREATE TABLE %s (%s)",
+                quoted(pageSinkTable),
+                getColumnDefinitionSql(session, new ColumnMetadata(pageSinkIdColumnName, TRINO_PAGE_SINK_ID_COLUMN_TYPE), pageSinkIdColumnName));
     }
 
     @Override
