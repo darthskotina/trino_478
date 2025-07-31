@@ -88,6 +88,7 @@ import io.trino.spi.block.MapBlock;
 import io.trino.spi.block.SqlMap;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.JoinCondition;
@@ -203,6 +204,7 @@ import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.AS_ARRAY;
 import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.AS_JSON;
 import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.DISABLED;
 import static io.trino.plugin.postgresql.PostgreSqlSessionProperties.getArrayMapping;
+import static io.trino.plugin.postgresql.PostgreSqlSessionProperties.isEnableConvertDecimalToVarchar;
 import static io.trino.plugin.postgresql.PostgreSqlSessionProperties.isEnableStringPushdownWithCollate;
 import static io.trino.plugin.postgresql.TypeUtils.arrayDepth;
 import static io.trino.plugin.postgresql.TypeUtils.getArrayElementPgTypeName;
@@ -265,6 +267,7 @@ public class PostgreSqlClient
     private static final String DUPLICATE_TABLE_SQLSTATE = "42P07";
     private static final int POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION = 6;
     private static final int PRECISION_OF_UNSPECIFIED_DECIMAL = 0;
+    private static final int POSTGRESQL_MAX_DECIMAL_PRECISION = 38;
 
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSSSSS");
 
@@ -407,12 +410,28 @@ public class PostgreSqlClient
     {
         checkArgument(tableMetadata.getProperties().isEmpty(), "Unsupported table properties: %s", tableMetadata.getProperties());
         ImmutableList.Builder<String> createTableSqlsBuilder = ImmutableList.builder();
-        createTableSqlsBuilder.add(format("CREATE TABLE %s (%s)", quoted(remoteTableName), join(", ", columns)));
+        String tableName = remoteTableName.toString().toLowerCase();
+        String createTableSql;
+        if (tableName.contains("tmp_trino_")) {
+            createTableSql = "CREATE UNLOGGED TABLE %s (%s)";
+        }
+        else {
+            createTableSql = "CREATE TABLE %s (%s)";
+        }
+        createTableSqlsBuilder.add(format(createTableSql, quoted(remoteTableName), join(", ", columns)));
         Optional<String> tableComment = tableMetadata.getComment();
         if (tableComment.isPresent()) {
             createTableSqlsBuilder.add(buildTableCommentSql(remoteTableName, tableComment));
         }
         return createTableSqlsBuilder.build();
+    }
+
+    @Override
+    protected String createPageSinkIdsTableSql(ConnectorSession session, RemoteTableName pageSinkTable, String pageSinkIdColumnName)
+    {
+        return format("CREATE UNLOGGED TABLE %s (%s)",
+                quoted(pageSinkTable),
+                getColumnDefinitionSql(session, new ColumnMetadata(pageSinkIdColumnName, TRINO_PAGE_SINK_ID_COLUMN_TYPE), pageSinkIdColumnName));
     }
 
     @Override
@@ -569,6 +588,8 @@ public class PostgreSqlClient
         String jdbcTypeName = typeHandle.jdbcTypeName()
                 .orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
 
+        log.info("Attempting to map column type: jdbcType=%d, jdbcTypeName=%s", typeHandle.jdbcType(), jdbcTypeName);
+
         Optional<ColumnMapping> mapping = getForcedMappingToVarchar(typeHandle);
         if (mapping.isPresent()) {
             return mapping;
@@ -632,8 +653,11 @@ public class PostgreSqlClient
                     }
                 }
                 precision = columnSize + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
-                if (columnSize == PRECISION_OF_UNSPECIFIED_DECIMAL || precision > Decimals.MAX_PRECISION) {
-                    break;
+                if (columnSize == PRECISION_OF_UNSPECIFIED_DECIMAL || precision > Decimals.MAX_PRECISION || precision <= 0) {
+                    if (isEnableConvertDecimalToVarchar(session) == true) {
+                        return mapToUnboundedVarchar(typeHandle);
+                    }
+                    return Optional.of(doubleColumnMapping());
                 }
                 return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0)), UNNECESSARY));
             }
@@ -1997,4 +2021,23 @@ public class PostgreSqlClient
             requireNonNull(averageColumnLength, "averageColumnLength is null");
         }
     }
+
+    @Override
+    protected void copyTableSchema(ConnectorSession session, Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
+    {
+        String sql = format(
+                "CREATE UNLOGGED TABLE %s AS SELECT %s FROM %s WHERE 0 = 1",
+                quoted(catalogName, schemaName, newTableName),
+                columnNames.stream()
+                        .map(this::quoted)
+                        .collect(joining(", ")),
+                quoted(catalogName, schemaName, tableName));
+        try {
+            execute(session, connection, sql);
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
 }

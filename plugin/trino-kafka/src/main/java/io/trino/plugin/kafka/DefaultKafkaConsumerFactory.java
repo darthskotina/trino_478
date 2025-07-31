@@ -27,6 +27,7 @@ import static io.trino.plugin.kafka.utils.PropertiesUtils.readProperties;
 import static java.util.stream.Collectors.joining;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG;
+import static org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.RECEIVE_BUFFER_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG;
@@ -37,6 +38,7 @@ public class DefaultKafkaConsumerFactory
     private final Set<HostAddress> nodes;
     private final DataSize kafkaBufferSize;
     private final Map<String, String> configurationProperties;
+    private final String consumerGroupId;
 
     @Inject
     public DefaultKafkaConsumerFactory(KafkaConfig kafkaConfig)
@@ -45,6 +47,7 @@ public class DefaultKafkaConsumerFactory
         nodes = kafkaConfig.getNodes();
         kafkaBufferSize = kafkaConfig.getKafkaBufferSize();
         configurationProperties = readProperties(kafkaConfig.getResourceConfigFiles());
+        consumerGroupId = kafkaConfig.getConsumerGroupId();
     }
 
     @Override
@@ -59,6 +62,11 @@ public class DefaultKafkaConsumerFactory
         properties.setProperty(VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         properties.setProperty(ENABLE_AUTO_COMMIT_CONFIG, Boolean.toString(false));
         properties.setProperty(RECEIVE_BUFFER_CONFIG, Long.toString(kafkaBufferSize.toBytes()));
+
+        // Set the consumer group ID
+        properties.setProperty(GROUP_ID_CONFIG, consumerGroupId);
+        System.out.println("Using Kafka consumer group ID: " + consumerGroupId);  // Add this line
+
         return properties;
     }
 }

@@ -29,6 +29,7 @@ public class PostgreSqlConfig
     private boolean includeSystemTables;
     private boolean enableStringPushdownWithCollate;
     private Integer fetchSize;
+    private boolean enableConvertDecimalToVarchar = true;
 
     public enum ArrayMapping
     {
@@ -85,6 +86,18 @@ public class PostgreSqlConfig
     public PostgreSqlConfig setFetchSize(Integer fetchSize)
     {
         this.fetchSize = fetchSize;
+        return this;
+    }
+
+    public boolean isEnableConvertDecimalToVarchar()
+    {
+        return enableConvertDecimalToVarchar;
+    }
+
+    @Config("postgresql.enable_convert_decimal_to_varchar")
+    public PostgreSqlConfig setEnableConvertDecimalToVarchar(boolean enableConvertDecimalToVarchar)
+    {
+        this.enableConvertDecimalToVarchar = enableConvertDecimalToVarchar;
         return this;
     }
 }

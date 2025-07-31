@@ -28,11 +28,14 @@ import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.JdbcJoinPushdownSupportModule;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
+import io.trino.plugin.jdbc.procedure.ExecuteProcedure;
 import io.trino.plugin.jdbc.ptf.Query;
 import io.trino.spi.function.table.ConnectorTableFunction;
+import io.trino.spi.procedure.Procedure;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.trino.plugin.jdbc.JdbcModule.bindSessionPropertiesProvider;
 
 public class VerticaClientModule
         extends AbstractConfigurationAwareModule
@@ -40,10 +43,13 @@ public class VerticaClientModule
     @Override
     protected void setup(Binder binder)
     {
+        configBinder(binder).bindConfig(VerticaConfig.class);
+
         binder.bind(VerticaClient.class).in(Scopes.SINGLETON);
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(VerticaClient.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(BaseJdbcConfig.class);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
+        bindSessionPropertiesProvider(binder, VerticaSessionProperties.class);
         configBinder(binder).bindConfigDefaults(JdbcStatisticsConfig.class, config -> {
             // Disabled by default because the user must be superuser to run EXPORT_STATISTICS function in Vertica
             config.setEnabled(false);
@@ -51,6 +57,8 @@ public class VerticaClientModule
 
         binder.install(new DecimalModule());
         install(new JdbcJoinPushdownSupportModule());
+
+        newSetBinder(binder, Procedure.class).addBinding().toProvider(ExecuteProcedure.class).in(Scopes.SINGLETON);
 
         @SuppressWarnings("TrinoExperimentalSpi")
         Class<ConnectorTableFunction> clazz = ConnectorTableFunction.class;

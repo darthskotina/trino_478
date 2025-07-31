@@ -47,7 +47,8 @@ public class TestMinimalFunctionality
         SchemaTableName schemaTableName = new SchemaTableName("default", topicName);
         return KafkaQueryRunner.builder(testingKafka)
                 .setExtraTopicDescription(ImmutableMap.of(schemaTableName, createEmptyTopicDescription(topicName, schemaTableName).getValue()))
-                .addConnectorProperties(ImmutableMap.of("kafka.messages-per-split", "100"))
+                .addConnectorProperties(ImmutableMap.of("kafka.messages-per-split", "100",
+                "kafka.consumer-group-id", "my-custom-consumer-group333"))
                 .build();
     }
 

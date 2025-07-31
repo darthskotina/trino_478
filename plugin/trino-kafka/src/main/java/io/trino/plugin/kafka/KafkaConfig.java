@@ -49,6 +49,7 @@ public class KafkaConfig
     private String tableDescriptionSupplier = FileTableDescriptionSupplier.NAME;
     private List<File> resourceConfigFiles = ImmutableList.of();
     private String internalFieldPrefix = "_";
+    private String consumerGroupId = "bigdata-spark-streaming";  // Default value
 
     @Size(min = 1)
     public Set<HostAddress> getNodes()
@@ -179,6 +180,20 @@ public class KafkaConfig
     public KafkaConfig setInternalFieldPrefix(String internalFieldPrefix)
     {
         this.internalFieldPrefix = internalFieldPrefix;
+        return this;
+    }
+
+    @NotNull
+    public String getConsumerGroupId()
+    {
+        return consumerGroupId;
+    }
+
+    @Config("kafka.consumer-group-id")
+    @ConfigDescription("Consumer group ID to use when connecting to Kafka")
+    public KafkaConfig setConsumerGroupId(String consumerGroupId)
+    {
+        this.consumerGroupId = consumerGroupId;
         return this;
     }
 }

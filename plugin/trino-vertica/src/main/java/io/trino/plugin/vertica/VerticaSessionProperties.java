@@ -11,48 +11,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.postgresql;
+package io.trino.plugin.vertica;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
-import io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.session.PropertyMetadata;
 
 import java.util.List;
 
 import static io.trino.spi.session.PropertyMetadata.booleanProperty;
-import static io.trino.spi.session.PropertyMetadata.enumProperty;
 
-public final class PostgreSqlSessionProperties
+public class VerticaSessionProperties
         implements SessionPropertiesProvider
 {
-    public static final String ARRAY_MAPPING = "array_mapping";
-    public static final String ENABLE_STRING_PUSHDOWN_WITH_COLLATE = "enable_string_pushdown_with_collate";
     public static final String CONVERT_DECIMAL_TO_VARCHAR = "enable_convert_decimal_to_varchar";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
-    public PostgreSqlSessionProperties(PostgreSqlConfig postgreSqlConfig)
+    public VerticaSessionProperties(VerticaConfig verticaConfig)
     {
         sessionProperties = ImmutableList.of(
-                enumProperty(
-                        ARRAY_MAPPING,
-                        "Handling of PostgreSql arrays",
-                        ArrayMapping.class,
-                        postgreSqlConfig.getArrayMapping(),
-                        false),
-                booleanProperty(
-                        ENABLE_STRING_PUSHDOWN_WITH_COLLATE,
-                        "Enable string pushdown with collate (experimental)",
-                        postgreSqlConfig.isEnableStringPushdownWithCollate(),
-                        false),
                 booleanProperty(
                         CONVERT_DECIMAL_TO_VARCHAR,
                         "Enable converting decimal columns to varchar",
-                        postgreSqlConfig.isEnableConvertDecimalToVarchar(),
+                        verticaConfig.isEnableConvertDecimalToVarchar(),
                         false));
     }
 
@@ -60,16 +45,6 @@ public final class PostgreSqlSessionProperties
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
-    }
-
-    public static ArrayMapping getArrayMapping(ConnectorSession session)
-    {
-        return session.getProperty(ARRAY_MAPPING, ArrayMapping.class);
-    }
-
-    public static boolean isEnableStringPushdownWithCollate(ConnectorSession session)
-    {
-        return session.getProperty(ENABLE_STRING_PUSHDOWN_WITH_COLLATE, Boolean.class);
     }
 
     public static boolean isEnableConvertDecimalToVarchar(ConnectorSession session)

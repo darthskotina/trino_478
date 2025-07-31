@@ -14,6 +14,7 @@
 package io.trino.plugin.vertica;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.common.math.LongMath;
 import com.google.inject.Inject;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
 import io.trino.plugin.base.mapping.IdentifierMapping;
@@ -28,8 +29,10 @@ import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongWriteFunction;
+import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
+import io.trino.plugin.jdbc.SliceWriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
 import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
 import io.trino.plugin.jdbc.expression.ParameterizedExpression;
@@ -43,7 +46,15 @@ import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.LongTimestamp;
+import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.StandardTypes;
+import io.trino.spi.type.TimeType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
+import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 
@@ -51,8 +62,13 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
@@ -60,6 +76,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.UUID;
 import java.util.function.BiFunction;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -72,6 +89,7 @@ import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRou
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRoundingMode;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
+import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.booleanColumnMapping;
@@ -80,31 +98,51 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.charColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.charWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.decimalColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.fromTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timeWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timestampWriteFunctionUsingSqlTimestamp;
+import static io.trino.plugin.jdbc.StandardColumnMappings.toTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
 import static io.trino.plugin.jdbc.UnsupportedTypeHandling.CONVERT_TO_VARCHAR;
+import static io.trino.plugin.vertica.VerticaSessionProperties.isEnableConvertDecimalToVarchar;
 import static io.trino.plugin.vertica.VerticaTableStatisticsReader.readTableStatistics;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.connector.JoinCondition.Operator.IDENTICAL;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.CharType.createCharType;
+import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeType.createTimeType;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
+import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_SECOND;
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_DAY;
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
+import static io.trino.spi.type.Timestamps.round;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
+import static io.trino.spi.type.UuidType.trinoUuidToJavaUuid;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static java.lang.Math.floorDiv;
+import static java.lang.Math.floorMod;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
+import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -114,11 +152,14 @@ public class VerticaClient
 {
     // Date format is different between read and write in Vertica
     private static final DateTimeFormatter DATE_READ_FORMATTER = DateTimeFormatter.ofPattern("u-MM-dd");
+    private static final int TRINO_MAX_DECIMAL_PRECISION = 38;
+    private static final int POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION = 6;
     private static final DateTimeFormatter DATE_WRITE_FORMATTER = new DateTimeFormatterBuilder()
             .appendValueReduced(ChronoField.YEAR, 4, 7, 1000)
             .appendPattern("-MM-dd[ G]")
             .toFormatter();
 
+    private final Type uuidType;
     private final boolean statisticsEnabled;
     private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
 
@@ -128,11 +169,13 @@ public class VerticaClient
             JdbcStatisticsConfig statisticsConfig,
             ConnectionFactory connectionFactory,
             QueryBuilder queryBuilder,
+            TypeManager typeManager,
             IdentifierMapping identifierMapping,
             RemoteQueryModifier queryModifier)
     {
         super("\"", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, false);
         this.statisticsEnabled = requireNonNull(statisticsConfig, "statisticsConfig is null").isEnabled();
+        this.uuidType = typeManager.getType(new TypeSignature(StandardTypes.UUID));
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
                 .withTypeClass("supported_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint", "decimal", "real", "char", "varchar"))
@@ -183,6 +226,8 @@ public class VerticaClient
     @Override
     public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
     {
+        String jdbcTypeName = typeHandle.jdbcTypeName()
+                .orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
         Optional<ColumnMapping> mappingToVarchar = getForcedMappingToVarchar(typeHandle);
         if (mappingToVarchar.isPresent()) {
             return mappingToVarchar;
@@ -207,6 +252,11 @@ public class VerticaClient
             case Types.NUMERIC:
                 int decimalDigits = typeHandle.requiredDecimalDigits();
                 int precision = typeHandle.requiredColumnSize() + max(-decimalDigits, 0);
+                if (precision > TRINO_MAX_DECIMAL_PRECISION || precision <= 0) {
+                    if (isEnableConvertDecimalToVarchar(session) == true) {
+                        return mapToUnboundedVarchar(typeHandle);
+                    }
+                }
                 if (getDecimalRounding(session) == ALLOW_OVERFLOW && precision > Decimals.MAX_PRECISION) {
                     int scale = min(decimalDigits, getDecimalDefaultScale(session));
                     return Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
@@ -228,6 +278,18 @@ public class VerticaClient
                         DATE,
                         (resultSet, index) -> LocalDate.parse(resultSet.getString(index), DATE_READ_FORMATTER).toEpochDay(),
                         dateWriteFunctionUsingString()));
+
+            case Types.TIME:
+                return Optional.of(timeColumnMapping(typeHandle.requiredDecimalDigits()));
+
+            case Types.TIMESTAMP:
+                return Optional.of(timestampColumnMappingUsingSqlTimestampWithRounding(TIMESTAMP_MICROS));
+        }
+
+        switch (jdbcTypeName) {
+            case "uuid":
+            case "Uuid":
+                return Optional.of(uuidColumnMapping());
         }
 
         if (getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR) {
@@ -235,6 +297,88 @@ public class VerticaClient
         }
 
         return Optional.empty();
+    }
+
+    private static void shortTimestampWriteFunction(PreparedStatement statement, int index, long epochMicros)
+            throws SQLException
+    {
+        LocalDateTime localDateTime = fromTrinoTimestamp(epochMicros);
+        statement.setTimestamp(index, Timestamp.valueOf(localDateTime.toString()));
+    }
+
+    private static LongWriteFunction shortTimestampWithTimeZoneWriteFunction()
+    {
+        return (statement, index, value) -> {
+            // PostgreSQL does not store zone information in "timestamp with time zone" data type
+            long millisUtc = unpackMillisUtc(value);
+            statement.setTimestamp(index, new Timestamp(millisUtc));
+        };
+    }
+
+    private static ObjectWriteFunction longTimestampWriteFunction()
+    {
+        return ObjectWriteFunction.of(LongTimestamp.class, ((statement, index, timestamp) -> {
+            // PostgreSQL supports up to 6 digits of precision
+            //noinspection ConstantConditions
+            verify(POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION == 6);
+
+            long epochMicros = timestamp.getEpochMicros();
+            if (timestamp.getPicosOfMicro() >= PICOSECONDS_PER_MICROSECOND / 2) {
+                epochMicros++;
+            }
+            shortTimestampWriteFunction(statement, index, epochMicros);
+        }));
+    }
+
+    private static ObjectWriteFunction longTimestampWithTimeZoneWriteFunction()
+    {
+        return ObjectWriteFunction.of(
+                LongTimestampWithTimeZone.class,
+                (statement, index, value) -> {
+                    // PostgreSQL does not store zone information in "timestamp with time zone" data type
+                    long epochSeconds = floorDiv(value.getEpochMillis(), MILLISECONDS_PER_SECOND);
+                    long nanosOfSecond = floorMod(value.getEpochMillis(), MILLISECONDS_PER_SECOND) * NANOSECONDS_PER_MILLISECOND + value.getPicosOfMilli() / PICOSECONDS_PER_NANOSECOND;
+                    statement.setObject(index, OffsetDateTime.ofInstant(Instant.ofEpochSecond(epochSeconds, nanosOfSecond), UTC_KEY.getZoneId()));
+                });
+    }
+
+    private static ColumnMapping timeColumnMapping(int precision)
+    {
+        verify(precision <= 6, "Unsupported precision: %s", precision); // PostgreSQL limit but also assumption within this method
+        return ColumnMapping.longMapping(
+                createTimeType(precision),
+                (resultSet, columnIndex) -> {
+                    LocalTime time = resultSet.getObject(columnIndex, LocalTime.class);
+                    long nanosOfDay = time.toNanoOfDay();
+                    if (nanosOfDay == NANOSECONDS_PER_DAY - 1) {
+                        // PostgreSQL's 24:00:00 is returned as 23:59:59.999999999, regardless of column precision
+                        nanosOfDay = NANOSECONDS_PER_DAY - LongMath.pow(10, 9 - precision);
+                    }
+
+                    long picosOfDay = nanosOfDay * PICOSECONDS_PER_NANOSECOND;
+                    return round(picosOfDay, 12 - precision);
+                },
+                timeWriteFunction(precision),
+                // Pushdown disabled because PostgreSQL distinguishes TIME '24:00:00' and TIME '00:00:00' whereas Trino does not.
+                DISABLE_PUSHDOWN);
+    }
+
+    private static ColumnMapping timestampColumnMappingUsingSqlTimestampWithRounding(TimestampType timestampType)
+    {
+        // TODO support higher precision
+        checkArgument(timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION, "Precision is out of range: %s", timestampType.getPrecision());
+        return ColumnMapping.longMapping(
+                timestampType,
+                (resultSet, columnIndex) -> {
+                    LocalDateTime localDateTime = resultSet.getTimestamp(columnIndex).toLocalDateTime();
+                    int roundedNanos = toIntExact(round(localDateTime.getNano(), 9 - timestampType.getPrecision()));
+                    LocalDateTime rounded = localDateTime
+                            .withNano(0)
+                            .plusNanos(roundedNanos);
+                    return toTrinoTimestamp(timestampType, rounded);
+                },
+                timestampWriteFunctionUsingSqlTimestamp(timestampType),
+                FULL_PUSHDOWN);
     }
 
     @Override
@@ -266,11 +410,11 @@ public class VerticaClient
             return WriteMapping.objectMapping(dataType, longDecimalWriteFunction(decimalType));
         }
 
-        if (type instanceof CharType charType) {
+        if (type instanceof CharType) {
             // TODO Handle cases where the value has multi-byte characters
             //  e.g. a CHAR(1) with value U+1F600 (3 bytes) will not fit in a CHAR(1) in Vertica.
             //  Trino counts codepoints/characters while Vertica counts bytes/octets.
-            int length = charType.getLength();
+            int length = ((CharType) type).getLength();
             checkArgument(length <= 65000, "Char length is greater than 65,000");
             return WriteMapping.sliceMapping("char(" + length + ")", charWriteFunction());
         }
@@ -305,7 +449,52 @@ public class VerticaClient
             return WriteMapping.longMapping("date", dateWriteFunctionUsingString());
         }
 
+        if (type.equals(uuidType)) {
+            return WriteMapping.sliceMapping("uuid", uuidWriteFunction());
+        }
+
+        if (type instanceof TimeType timeType) {
+            if (timeType.getPrecision() <= POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION) {
+                return WriteMapping.longMapping(format("time(%s)", timeType.getPrecision()), timeWriteFunction(timeType.getPrecision()));
+            }
+            return WriteMapping.longMapping(format("time(%s)", POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION), timeWriteFunction(POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION));
+        }
+
+        if (type instanceof TimestampType timestampType) {
+            if (timestampType.getPrecision() <= POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION) {
+                verify(timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION);
+                return WriteMapping.longMapping(format("timestamp(%s)", timestampType.getPrecision()), VerticaClient::shortTimestampWriteFunction);
+            }
+            verify(timestampType.getPrecision() > TimestampType.MAX_SHORT_PRECISION);
+            return WriteMapping.objectMapping(format("timestamp(%s)", POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION), longTimestampWriteFunction());
+        }
+        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            if (timestampWithTimeZoneType.getPrecision() <= POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION) {
+                String dataType = format("timestamptz(%d)", timestampWithTimeZoneType.getPrecision());
+                if (timestampWithTimeZoneType.getPrecision() <= TimestampWithTimeZoneType.MAX_SHORT_PRECISION) {
+                    return WriteMapping.longMapping(dataType, shortTimestampWithTimeZoneWriteFunction());
+                }
+                return WriteMapping.objectMapping(dataType, longTimestampWithTimeZoneWriteFunction());
+            }
+            return WriteMapping.objectMapping(format("timestamptz(%d)", POSTGRESQL_MAX_SUPPORTED_TIMESTAMP_PRECISION), longTimestampWithTimeZoneWriteFunction());
+        }
+
         throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
+    }
+
+    private static SliceWriteFunction uuidWriteFunction()
+    {
+        //return (statement, index, value) -> statement.setObject(index, trinoUuidToJavaUuid(value), Types.OTHER);
+        return (statement, index, value) ->
+                statement.setString(index, trinoUuidToJavaUuid(value).toString());
+    }
+
+    private ColumnMapping uuidColumnMapping()
+    {
+        return ColumnMapping.sliceMapping(
+                uuidType,
+                (resultSet, columnIndex) -> javaUuidToTrinoUuid((UUID) resultSet.getObject(columnIndex)),
+                uuidWriteFunction());
     }
 
     private static LongWriteFunction dateWriteFunctionUsingString()
