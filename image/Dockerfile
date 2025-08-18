@@ -76,8 +76,8 @@ COPY --from=builder /artifacts/plugins/iceberg /usr/lib/trino/plugin/iceberg
 COPY --from=builder /artifacts/lib/io.trino_trino-main-${TRINO_VERSION}.jar /usr/lib/trino/lib/
 
 # Copy Kafka configurations
-RUN mkdir -p /etc/kafka
-COPY image/kafka_table_descriptions/ /etc/kafka/
+#RUN mkdir -p /etc/kafka
+#COPY image/kafka_table_descriptions/ /etc/kafka/
 
 RUN mkdir -p /etc/kafka_certs
 COPY image/kafka_certs/ /etc/kafka_certs/
