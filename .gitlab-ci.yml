@@ -15,7 +15,8 @@ stages:
     if [ -n "$CI_COMMIT_TAG" ]; then
       export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_TAG}"
     else
-      export ARTIFACT_VERSION="${TRINO_VERSION}-${BUILD_TIMESTAMP}"
+      # Include pipeline ID to ensure uniqueness
+      export ARTIFACT_VERSION="${TRINO_VERSION}-${BUILD_TIMESTAMP}-${CI_PIPELINE_ID}"
     fi
 
 # Build job that compiles Trino plugins and core components
@@ -23,6 +24,7 @@ build-trino:
   stage: build
   image: eclipse-temurin:23-jdk
   before_script:
+    - *version_setup
     - echo "Building version $ARTIFACT_VERSION"
   script:
     - echo "Building Trino plugins and core components..."
@@ -156,12 +158,41 @@ deploy-to-artifactory-manual:
       # First, ensure zip is installed
       apt-get update -qq && apt-get install -yqq zip
 
+      # Function to check if artifact exists
+      check_artifact_exists() {
+        local GROUP_ID="$1"
+        local ARTIFACT_ID="$2"
+        local VERSION="$3"
+        local PACKAGING="$4"
+
+        # Convert group ID dots to slashes for URL path
+        local GROUP_PATH=$(echo "$GROUP_ID" | tr '.' '/')
+        local URL="https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}.${PACKAGING}"
+
+        echo "Checking if artifact exists: $URL"
+
+        # Use wget to check if artifact exists (returns 0 if exists, non-zero if not)
+        if wget --spider --quiet \
+             --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+             "$URL" 2>/dev/null; then
+          return 0  # Exists
+        else
+          return 1  # Does not exist
+        fi
+      }
+
       # Deploy each plugin as a ZIP archive
       for plugin in postgresql vertica kafka delta-lake iceberg; do
         echo "=== Deploying $plugin plugin ==="
         PLUGIN_DIR="artifacts/plugins/$plugin"
 
         if [ -d "$PLUGIN_DIR" ] && [ "$(ls -A $PLUGIN_DIR 2>/dev/null)" ]; then
+          # Check if this artifact already exists
+          if check_artifact_exists "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" "zip"; then
+            echo "WARNING: Artifact trino-${plugin}-complete version $ARTIFACT_VERSION already exists in Artifactory. Skipping..."
+            continue
+          fi
+
           # Create a ZIP of all JARs
           cd "$PLUGIN_DIR"
           zip -r /tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip *.jar
@@ -189,26 +220,34 @@ deploy-to-artifactory-manual:
             -Dfile=/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip \
             -DpomFile=/tmp/pom-${plugin}.xml \
             -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
+            || echo "ERROR: Failed to deploy ${plugin} plugin (may already exist)"
 
           echo "Successfully deployed trino-${plugin}-complete-${ARTIFACT_VERSION}.zip"
         else
           echo "No JARs found for $plugin plugin"
         fi
       done
+
       # Deploy core components
       echo "=== Deploying core components ==="
       if [ -f "artifacts/core/trino-main-${TRINO_VERSION}.jar" ]; then
-        echo "Deploying trino-main..."
-        mvn deploy:deploy-file \
-          -DgroupId=com.exness.trino \
-          -DartifactId=trino-main \
-          -Dversion=$ARTIFACT_VERSION \
-          -Dpackaging=jar \
-          -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
-          -DrepositoryId=exness-artifactory \
-          -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated
-        echo "trino-main deployed successfully"
+        # Check if this artifact already exists
+        if check_artifact_exists "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" "jar"; then
+          echo "WARNING: Artifact trino-main version $ARTIFACT_VERSION already exists in Artifactory. Skipping..."
+        else
+          echo "Deploying trino-main..."
+          mvn deploy:deploy-file \
+            -DgroupId=com.exness.trino \
+            -DartifactId=trino-main \
+            -Dversion=$ARTIFACT_VERSION \
+            -Dpackaging=jar \
+            -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
+            -DrepositoryId=exness-artifactory \
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
+            || echo "ERROR: Failed to deploy trino-main (may already exist)"
+          echo "trino-main deployed successfully"
+        fi
       else
         echo "WARNING: trino-main JAR not found, skipping"
       fi
