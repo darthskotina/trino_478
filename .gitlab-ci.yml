@@ -154,59 +154,49 @@ deploy-to-artifactory-manual:
     - chmod 600 ~/.m2/settings.xml
   script:
     - |
-      # Deploy each plugin's JARs
+      # First, ensure zip is installed
+      apt-get update -qq && apt-get install -yqq zip
+
+      # Deploy each plugin as a ZIP archive
       for plugin in postgresql vertica kafka delta-lake iceberg; do
-        echo "=== Deploying $plugin plugin JARs ==="
-        if [ -d "artifacts/plugins/$plugin" ] && [ "$(ls -A artifacts/plugins/$plugin)" ]; then
-          JAR_COUNT=0
-          for jar in artifacts/plugins/$plugin/*.jar; do
-            if [ -f "$jar" ]; then
-              JAR_NAME=$(basename "$jar" .jar)
-              # Extract classifier more carefully
-              # Remove the base plugin name and version to get classifier
-              BASE_NAME="trino-${plugin}-${TRINO_VERSION}"
-              CLASSIFIER=""
-              if [[ "$JAR_NAME" == "$BASE_NAME"-* ]]; then
-                # Has a classifier
-                CLASSIFIER="${JAR_NAME#$BASE_NAME-}"
-              elif [[ "$JAR_NAME" != "$BASE_NAME" ]]; then
-                # Different naming pattern, use full name as classifier
-                CLASSIFIER="${JAR_NAME}"
-              fi
+        echo "=== Deploying $plugin plugin ==="
+        PLUGIN_DIR="artifacts/plugins/$plugin"
 
-              echo "Deploying: $jar (classifier: ${CLASSIFIER:-none})"
+        if [ -d "$PLUGIN_DIR" ] && [ "$(ls -A $PLUGIN_DIR 2>/dev/null)" ]; then
+          # Create a ZIP of all JARs
+          cd "$PLUGIN_DIR"
+          zip -r /tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip *.jar
+          cd -
 
-              if [ -z "$CLASSIFIER" ]; then
-                # Deploy without classifier
-                mvn deploy:deploy-file \
-                  -DgroupId=com.exness.trino \
-                  -DartifactId=trino-$plugin \
-                  -Dversion=$ARTIFACT_VERSION \
-                  -Dpackaging=jar \
-                  -Dfile=$jar \
-                  -DrepositoryId=exness-artifactory \
-                  -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated
-              else
-                # Deploy with classifier
-                mvn deploy:deploy-file \
-                  -DgroupId=com.exness.trino \
-                  -DartifactId=trino-$plugin \
-                  -Dversion=$ARTIFACT_VERSION \
-                  -Dpackaging=jar \
-                  -Dfile=$jar \
-                  -DrepositoryId=exness-artifactory \
-                  -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
-                  -Dclassifier=$CLASSIFIER
-              fi
-              JAR_COUNT=$((JAR_COUNT + 1))
-            fi
-          done
-          echo "Deployed $JAR_COUNT JARs for $plugin"
+          # Create a POM file that references the ZIP
+          cat > /tmp/pom-${plugin}.xml << EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <project>
+        <modelVersion>4.0.0</modelVersion>
+        <groupId>com.exness.trino</groupId>
+        <artifactId>trino-${plugin}-complete</artifactId>
+        <version>${ARTIFACT_VERSION}</version>
+        <packaging>zip</packaging>
+      </project>
+      EOF
+
+          # Deploy the ZIP with its POM
+          echo "Deploying ZIP archive for ${plugin}..."
+          mvn deploy:deploy-file \
+            -DgroupId=com.exness.trino \
+            -DartifactId=trino-${plugin}-complete \
+            -Dversion=$ARTIFACT_VERSION \
+            -Dpackaging=zip \
+            -Dfile=/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip \
+            -DpomFile=/tmp/pom-${plugin}.xml \
+            -DrepositoryId=exness-artifactory \
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated
+
+          echo "Successfully deployed trino-${plugin}-complete-${ARTIFACT_VERSION}.zip"
         else
           echo "No JARs found for $plugin plugin"
         fi
       done
-
       # Deploy core components
       echo "=== Deploying core components ==="
       if [ -f "artifacts/core/trino-main-${TRINO_VERSION}.jar" ]; then
