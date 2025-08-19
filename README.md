@@ -73,6 +73,8 @@ project root directory:
 
     ./mvnw clean install -DskipTests
 
+docker build -f image/Dockerfile -t artifactory.exness.io/docker/big-data/infrastructure/trino/trino_full_image:475_TEST --push .
+
 On the first build, Maven downloads all the dependencies from the internet
 and caches them in the local repository (`~/.m2/repository`), which can take a
 while, depending on your connection speed. Subsequent builds are faster.
