@@ -91,12 +91,6 @@ build-trino:
     expire_in: 1 day
     reports:
       dotenv: build.env
-  only:
-    - main
-    - master
-    - tags
-  except:
-    - schedules
 
 # Deploy to Artifactory - Manual trigger for feature branches
 deploy-to-artifactory-manual:
