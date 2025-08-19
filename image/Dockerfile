@@ -14,8 +14,13 @@ WORKDIR /build
 # Note: Build context should be the repository root, not the image folder
 COPY . /build/
 
+ENV MAVEN_OPTS="-Xmx4g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
 # Build Trino with Maven wrapper
-RUN ./mvnw clean install -DskipTests
+RUN ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true \
+    -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,core/trino-main \
+    -am \
+    -T 1C
 
 # Create staging directories for artifacts we'll need
 RUN mkdir -p /artifacts/plugins/postgresql && \
@@ -92,7 +97,7 @@ RUN chmod -R +r /usr/lib/trino/plugin/vertica && \
     chmod -R +r /usr/lib/trino/plugin/storage && \
     chmod -R +r /usr/lib/trino/plugin/delta-lake && \
     chmod -R +r /usr/lib/trino/plugin/iceberg && \
-    chmod -R +r /etc/kafka && \
+#    chmod -R +r /etc/kafka && \
     chmod -R +r /etc/kafka_certs && \
     chmod -R +r /usr/lib/trino/plugin/postgresql && \
     mkdir -p /opt/java/openjdk/lib/security && \
