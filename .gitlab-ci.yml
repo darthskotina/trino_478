@@ -27,7 +27,11 @@ build-trino:
     - echo "Building version $ARTIFACT_VERSION"
   script:
     - echo "Building Trino plugins and core components..."
-    - ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true
+    - |
+      ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true \
+        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,core/trino-main \
+        -am \
+        -T 1C
 
     # Create artifact directories first
     - mkdir -p artifacts/plugins/postgresql
