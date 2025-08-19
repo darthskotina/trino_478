@@ -102,8 +102,6 @@ build-trino:
       when: on_success
     - if: '$CI_COMMIT_TAG'
       when: on_success
-    - if: '$TRIGGER_FULL_PIPELINE == "true"'
-      when: on_success
     - when: manual
 
 # Deploy to Artifactory - Manual trigger for feature branches
@@ -118,8 +116,6 @@ deploy-to-artifactory-manual:
   rules:
     - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
       when: manual
-    - if: '$TRIGGER_FULL_PIPELINE == "true"'
-      when: on_success
   before_script:
     - *version_setup
     - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
@@ -231,14 +227,3 @@ deploy-to-artifactory-auto:
       when: on_success
     - if: '$CI_COMMIT_TAG'
       when: on_success
-
-build-and-deploy-manual:
-  stage: build
-  image: alpine:latest
-  rules:
-    - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
-      when: manual
-  script:
-    - echo "Triggering full pipeline for branch $CI_COMMIT_BRANCH"
-  variables:
-    TRIGGER_FULL_PIPELINE: "true"
