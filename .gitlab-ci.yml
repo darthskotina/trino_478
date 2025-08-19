@@ -1,0 +1,233 @@
+variables:
+  ARTIFACTORY_URL: artifactory.exness.io
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+  MAVEN_OPTS: "-Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+  TRINO_VERSION: "475"  # Base Trino version
+
+stages:
+  - build
+  - deploy
+
+# YAML anchor for version setup - reusable across jobs
+.version_setup: &version_setup
+  - export BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M)
+  - |
+    if [ -n "$CI_COMMIT_TAG" ]; then
+      export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_TAG}"
+    else
+      export ARTIFACT_VERSION="${TRINO_VERSION}-${BUILD_TIMESTAMP}"
+    fi
+
+# Build job that compiles Trino plugins and core components
+build-trino:
+  stage: build
+  image: eclipse-temurin:23-jdk
+  before_script:
+    - *version_setup
+    - echo "Building version $ARTIFACT_VERSION"
+  script:
+    - echo "Building Trino plugins and core components..."
+    - ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true
+
+    # Create artifact directories first
+    - mkdir -p artifacts/plugins/postgresql
+    - mkdir -p artifacts/plugins/vertica
+    - mkdir -p artifacts/plugins/kafka
+    - mkdir -p artifacts/plugins/delta-lake
+    - mkdir -p artifacts/plugins/iceberg
+    - mkdir -p artifacts/core
+
+    # Copy plugin artifacts (with better error handling)
+    - |
+      if [ -d "plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}/*.jar artifacts/plugins/postgresql/ || echo "No JARs found for postgresql"
+      else
+        echo "PostgreSQL plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-vertica/target/trino-vertica-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-vertica/target/trino-vertica-${TRINO_VERSION}/*.jar artifacts/plugins/vertica/ || echo "No JARs found for vertica"
+      else
+        echo "Vertica plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-kafka/target/trino-kafka-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-kafka/target/trino-kafka-${TRINO_VERSION}/*.jar artifacts/plugins/kafka/ || echo "No JARs found for kafka"
+      else
+        echo "Kafka plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-delta-lake/target/trino-delta-lake-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-delta-lake/target/trino-delta-lake-${TRINO_VERSION}/*.jar artifacts/plugins/delta-lake/ || echo "No JARs found for delta-lake"
+      else
+        echo "Delta Lake plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-iceberg/target/trino-iceberg-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-iceberg/target/trino-iceberg-${TRINO_VERSION}/*.jar artifacts/plugins/iceberg/ || echo "No JARs found for iceberg"
+      else
+        echo "Iceberg plugin build directory not found"
+      fi
+
+    # Copy core components
+    - |
+      if [ -f "core/trino-main/target/trino-main-${TRINO_VERSION}.jar" ]; then
+        cp core/trino-main/target/trino-main-${TRINO_VERSION}.jar artifacts/core/
+        echo "Core component trino-main copied successfully"
+      else
+        echo "WARNING: trino-main JAR not found"
+      fi
+
+    # List what we've collected
+    - echo "=== Build Artifacts Summary ==="
+    - find artifacts -type f -name "*.jar" | sort
+
+    # Create build.env file in script section (not after_script)
+    - echo "ARTIFACT_VERSION=$ARTIFACT_VERSION" > build.env
+
+  artifacts:
+    paths:
+      - artifacts/
+    expire_in: 1 day
+    reports:
+      dotenv: build.env
+  only:
+    - main
+    - master
+    - tags
+  except:
+    - schedules
+
+# Deploy to Artifactory - Manual trigger for feature branches
+deploy-to-artifactory-manual:
+  stage: deploy
+  image: artifactory.exness.io/golden-images/maven:3.9.7-eclipse-temurin-17-jdk
+  id_tokens:
+    JFROG_ID_TOKEN:
+      aud: https://$ARTIFACTORY_URL/
+  dependencies:
+    - build-trino
+  rules:
+    - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
+      when: manual
+  before_script:
+    - *version_setup
+    - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
+    - apt-get update -q && apt-get install -yq --no-install-recommends wget jq
+    # Get OIDC token from JFrog
+    - |
+      JFROG_ACCESS_TOKEN=$(wget --quiet \
+        --header="Content-Type: application/json" \
+        --post-data='{
+          "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+          "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+          "subject_token": "'$JFROG_ID_TOKEN'",
+          "provider_name": "gitlab-oidc"
+        }' \
+        --output-document - \
+        "https://${ARTIFACTORY_URL}/access/api/v1/oidc/token" | jq -r .access_token)
+    # Create Maven settings.xml with OIDC token
+    - mkdir -p ~/.m2
+    - |
+      cat > ~/.m2/settings.xml << EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                http://maven.apache.org/xsd/settings-1.0.0.xsd">
+        <servers>
+          <server>
+            <id>exness-artifactory</id>
+            <username>$GITLAB_USER_LOGIN</username>
+            <password>$JFROG_ACCESS_TOKEN</password>
+          </server>
+        </servers>
+      </settings>
+      EOF
+    # Secure the settings file
+    - chmod 600 ~/.m2/settings.xml
+  script:
+    - |
+      # Deploy each plugin's JARs
+      for plugin in postgresql vertica kafka delta-lake iceberg; do
+        echo "=== Deploying $plugin plugin JARs ==="
+        if [ -d "artifacts/plugins/$plugin" ] && [ "$(ls -A artifacts/plugins/$plugin)" ]; then
+          JAR_COUNT=0
+          for jar in artifacts/plugins/$plugin/*.jar; do
+            if [ -f "$jar" ]; then
+              JAR_NAME=$(basename "$jar" .jar)
+              # Extract classifier more carefully
+              # Remove the base plugin name and version to get classifier
+              BASE_NAME="trino-${plugin}-${TRINO_VERSION}"
+              CLASSIFIER=""
+              if [[ "$JAR_NAME" == "$BASE_NAME"-* ]]; then
+                # Has a classifier
+                CLASSIFIER="${JAR_NAME#$BASE_NAME-}"
+              elif [[ "$JAR_NAME" != "$BASE_NAME" ]]; then
+                # Different naming pattern, use full name as classifier
+                CLASSIFIER="${JAR_NAME}"
+              fi
+
+              echo "Deploying: $jar (classifier: ${CLASSIFIER:-none})"
+
+              if [ -z "$CLASSIFIER" ]; then
+                # Deploy without classifier
+                mvn deploy:deploy-file \
+                  -DgroupId=com.exness.trino \
+                  -DartifactId=trino-$plugin \
+                  -Dversion=$ARTIFACT_VERSION \
+                  -Dpackaging=jar \
+                  -Dfile=$jar \
+                  -DrepositoryId=exness-artifactory \
+                  -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated
+              else
+                # Deploy with classifier
+                mvn deploy:deploy-file \
+                  -DgroupId=com.exness.trino \
+                  -DartifactId=trino-$plugin \
+                  -Dversion=$ARTIFACT_VERSION \
+                  -Dpackaging=jar \
+                  -Dfile=$jar \
+                  -DrepositoryId=exness-artifactory \
+                  -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
+                  -Dclassifier=$CLASSIFIER
+              fi
+              JAR_COUNT=$((JAR_COUNT + 1))
+            fi
+          done
+          echo "Deployed $JAR_COUNT JARs for $plugin"
+        else
+          echo "No JARs found for $plugin plugin"
+        fi
+      done
+
+      # Deploy core components
+      echo "=== Deploying core components ==="
+      if [ -f "artifacts/core/trino-main-${TRINO_VERSION}.jar" ]; then
+        echo "Deploying trino-main..."
+        mvn deploy:deploy-file \
+          -DgroupId=com.exness.trino \
+          -DartifactId=trino-main \
+          -Dversion=$ARTIFACT_VERSION \
+          -Dpackaging=jar \
+          -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
+          -DrepositoryId=exness-artifactory \
+          -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated
+        echo "trino-main deployed successfully"
+      else
+        echo "WARNING: trino-main JAR not found, skipping"
+      fi
+
+      echo "=== Deployment Summary ==="
+      echo "All artifacts have been deployed to:"
+      echo "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/com/exness/trino/"
+      echo "Version: $ARTIFACT_VERSION"
+
+# Deploy to Artifactory - Automatic for main/master (same script as manual)
+deploy-to-artifactory-auto:
+  extends: deploy-to-artifactory-manual
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
