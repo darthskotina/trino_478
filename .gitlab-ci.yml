@@ -23,7 +23,6 @@ build-trino:
   stage: build
   image: eclipse-temurin:23-jdk
   before_script:
-    - *version_setup
     - echo "Building version $ARTIFACT_VERSION"
   script:
     - echo "Building Trino plugins and core components..."
