@@ -2,29 +2,74 @@ variables:
   ARTIFACTORY_URL: artifactory.exness.io
   MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
   MAVEN_OPTS: "-Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
-  TRINO_VERSION: "475"  # Base Trino version
+  TRINO_VERSION: "475"
 
 stages:
   - build
   - deploy
 
-# YAML anchor for version setup - reusable across jobs
-.version_setup: &version_setup
+.version_setup_main: &version_setup_main
+  - |
+    if [ -n "$CI_COMMIT_TAG" ]; then
+      # For tagged builds, use the tag directly as version
+      export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+    else
+      # For main branch, use TRINO_VERSION.minor format
+      # Get the latest tag that matches our version pattern
+      git fetch --tags
+      LAST_TAG=$(git tag -l "${TRINO_VERSION}.*" | sort -V | tail -n1)
+
+      if [ -z "$LAST_TAG" ]; then
+        # No existing tags, start with .1
+        export ARTIFACT_VERSION="${TRINO_VERSION}.1"
+      else
+        # Extract minor version and increment
+        MINOR_VERSION=$(echo $LAST_TAG | cut -d. -f2)
+        NEXT_MINOR=$((MINOR_VERSION + 1))
+        export ARTIFACT_VERSION="${TRINO_VERSION}.${NEXT_MINOR}"
+      fi
+
+      echo "Calculated version: $ARTIFACT_VERSION (based on last tag: ${LAST_TAG:-none})"
+    fi
+
+.version_setup_feature: &version_setup_feature
   - export BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
   - |
     if [ -n "$CI_COMMIT_TAG" ]; then
-      export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_TAG}"
+      # For tagged builds, use the tag directly as version
+      export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
     else
-      # Include pipeline ID to ensure uniqueness
-      export ARTIFACT_VERSION="${TRINO_VERSION}-${BUILD_TIMESTAMP}-${CI_PIPELINE_ID}"
+      # For feature branches, use TRINO_VERSION-branch-timestamp format
+      # CI_COMMIT_REF_SLUG is the branch name sanitized for use in URLs
+      export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_REF_SLUG}-${BUILD_TIMESTAMP}"
+      echo "Feature branch version: $ARTIFACT_VERSION"
     fi
 
-# Build job that compiles Trino plugins and core components
 build-trino:
   stage: build
   image: eclipse-temurin:23-jdk
   before_script:
-    - *version_setup
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ] || [ "$CI_COMMIT_BRANCH" = "master" ] || [ -n "$CI_COMMIT_TAG" ]; then
+        echo "Using main branch versioning"
+        git fetch --tags
+        if [ -n "$CI_COMMIT_TAG" ]; then
+          export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+        else
+          LAST_TAG=$(git tag -l "${TRINO_VERSION}.*" | sort -V | tail -n1)
+          if [ -z "$LAST_TAG" ]; then
+            export ARTIFACT_VERSION="${TRINO_VERSION}.1"
+          else
+            MINOR_VERSION=$(echo $LAST_TAG | cut -d. -f2)
+            NEXT_MINOR=$((MINOR_VERSION + 1))
+            export ARTIFACT_VERSION="${TRINO_VERSION}.${NEXT_MINOR}"
+          fi
+        fi
+      else
+        echo "Using feature branch versioning"
+        export BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_REF_SLUG}-${BUILD_TIMESTAMP}"
+      fi
     - echo "Building version $ARTIFACT_VERSION"
   script:
     - echo "Building Trino plugins and core components..."
@@ -34,7 +79,6 @@ build-trino:
         -am \
         -T 1C
 
-    # Create artifact directories first
     - mkdir -p artifacts/plugins/postgresql
     - mkdir -p artifacts/plugins/vertica
     - mkdir -p artifacts/plugins/kafka
@@ -42,7 +86,6 @@ build-trino:
     - mkdir -p artifacts/plugins/iceberg
     - mkdir -p artifacts/core
 
-    # Copy plugin artifacts (with better error handling)
     - |
       if [ -d "plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}" ]; then
         cp -r plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}/*.jar artifacts/plugins/postgresql/ || echo "No JARs found for postgresql"
@@ -74,7 +117,6 @@ build-trino:
         echo "Iceberg plugin build directory not found"
       fi
 
-    # Copy core components
     - |
       if [ -f "core/trino-main/target/trino-main-${TRINO_VERSION}.jar" ]; then
         cp core/trino-main/target/trino-main-${TRINO_VERSION}.jar artifacts/core/
@@ -83,11 +125,9 @@ build-trino:
         echo "WARNING: trino-main JAR not found"
       fi
 
-    # List what we've collected
     - echo "=== Build Artifacts Summary ==="
     - find artifacts -type f -name "*.jar" | sort
 
-    # Create build.env file in script section (not after_script)
     - echo "ARTIFACT_VERSION=$ARTIFACT_VERSION" > build.env
 
   artifacts:
@@ -105,7 +145,6 @@ build-trino:
       when: on_success
     - when: manual
 
-# Deploy to Artifactory - Manual trigger for feature branches
 deploy-to-artifactory-manual:
   stage: deploy
   image: artifactory.exness.io/golden-images/maven:3.9.7-eclipse-temurin-17-jdk
@@ -118,10 +157,9 @@ deploy-to-artifactory-manual:
     - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
       when: manual
   before_script:
-    - *version_setup
+    - *version_setup_feature
     - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
     - apt-get update -q && apt-get install -yq --no-install-recommends wget jq
-    # Get OIDC token from JFrog
     - |
       JFROG_ACCESS_TOKEN=$(wget --quiet \
         --header="Content-Type: application/json" \
@@ -133,7 +171,6 @@ deploy-to-artifactory-manual:
         }' \
         --output-document - \
         "https://${ARTIFACTORY_URL}/access/api/v1/oidc/token" | jq -r .access_token)
-    # Create Maven settings.xml with OIDC token
     - mkdir -p ~/.m2
     - |
       cat > ~/.m2/settings.xml << EOF
@@ -151,27 +188,22 @@ deploy-to-artifactory-manual:
         </servers>
       </settings>
       EOF
-    # Secure the settings file
     - chmod 600 ~/.m2/settings.xml
   script:
     - |
-      # First, ensure zip is installed
       apt-get update -qq && apt-get install -yqq zip
 
-      # Function to check if artifact exists
       check_artifact_exists() {
         local GROUP_ID="$1"
         local ARTIFACT_ID="$2"
         local VERSION="$3"
         local PACKAGING="$4"
 
-        # Convert group ID dots to slashes for URL path
         local GROUP_PATH=$(echo "$GROUP_ID" | tr '.' '/')
         local URL="https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}.${PACKAGING}"
 
         echo "Checking if artifact exists: $URL"
 
-        # Use wget to check if artifact exists (returns 0 if exists, non-zero if not)
         if wget --spider --quiet \
              --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
              "$URL" 2>/dev/null; then
@@ -181,24 +213,20 @@ deploy-to-artifactory-manual:
         fi
       }
 
-      # Deploy each plugin as a ZIP archive
       for plugin in postgresql vertica kafka delta-lake iceberg; do
         echo "=== Deploying $plugin plugin ==="
         PLUGIN_DIR="artifacts/plugins/$plugin"
 
         if [ -d "$PLUGIN_DIR" ] && [ "$(ls -A $PLUGIN_DIR 2>/dev/null)" ]; then
-          # Check if this artifact already exists
           if check_artifact_exists "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" "zip"; then
             echo "WARNING: Artifact trino-${plugin}-complete version $ARTIFACT_VERSION already exists in Artifactory. Skipping..."
             continue
           fi
 
-          # Create a ZIP of all JARs
           cd "$PLUGIN_DIR"
           zip -r /tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip *.jar
           cd -
 
-          # Create a POM file that references the ZIP
           cat > /tmp/pom-${plugin}.xml << EOF
       <?xml version="1.0" encoding="UTF-8"?>
       <project>
@@ -210,7 +238,6 @@ deploy-to-artifactory-manual:
       </project>
       EOF
 
-          # Deploy the ZIP with its POM
           echo "Deploying ZIP archive for ${plugin}..."
           mvn deploy:deploy-file \
             -DgroupId=com.exness.trino \
@@ -229,10 +256,8 @@ deploy-to-artifactory-manual:
         fi
       done
 
-      # Deploy core components
       echo "=== Deploying core components ==="
       if [ -f "artifacts/core/trino-main-${TRINO_VERSION}.jar" ]; then
-        # Check if this artifact already exists
         if check_artifact_exists "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" "jar"; then
           echo "WARNING: Artifact trino-main version $ARTIFACT_VERSION already exists in Artifactory. Skipping..."
         else
@@ -257,9 +282,12 @@ deploy-to-artifactory-manual:
       echo "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/com/exness/trino/"
       echo "Version: $ARTIFACT_VERSION"
 
-# Deploy to Artifactory - Automatic for main/master (same script as manual)
 deploy-to-artifactory-auto:
   extends: deploy-to-artifactory-manual
+  before_script:
+    - *version_setup_main
+    - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
+    - apt-get update -q && apt-get install -yq --no-install-recommends wget jq
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
       when: on_success
