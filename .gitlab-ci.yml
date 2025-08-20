@@ -2,7 +2,7 @@ variables:
   ARTIFACTORY_URL: artifactory.exness.io
   MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
   MAVEN_OPTS: "-Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
-  TRINO_VERSION: "475"
+  TRINO_VERSION: "475"  # Base Trino version
 
 stages:
   - build
@@ -239,7 +239,7 @@ deploy-to-artifactory-manual:
       EOF
 
           echo "Deploying ZIP archive for ${plugin}..."
-          mvn deploy:deploy-file \
+          if mvn deploy:deploy-file \
             -DgroupId=com.exness.trino \
             -DartifactId=trino-${plugin}-complete \
             -Dversion=$ARTIFACT_VERSION \
@@ -247,10 +247,11 @@ deploy-to-artifactory-manual:
             -Dfile=/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip \
             -DpomFile=/tmp/pom-${plugin}.xml \
             -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
-            || echo "ERROR: Failed to deploy ${plugin} plugin (may already exist)"
-
-          echo "Successfully deployed trino-${plugin}-complete-${ARTIFACT_VERSION}.zip"
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
+            echo "Successfully deployed trino-${plugin}-complete-${ARTIFACT_VERSION}.zip"
+          else
+            echo "ERROR: Failed to deploy ${plugin} plugin (may already exist)"
+          fi
         else
           echo "No JARs found for $plugin plugin"
         fi
@@ -262,16 +263,18 @@ deploy-to-artifactory-manual:
           echo "WARNING: Artifact trino-main version $ARTIFACT_VERSION already exists in Artifactory. Skipping..."
         else
           echo "Deploying trino-main..."
-          mvn deploy:deploy-file \
+          if mvn deploy:deploy-file \
             -DgroupId=com.exness.trino \
             -DartifactId=trino-main \
             -Dversion=$ARTIFACT_VERSION \
             -Dpackaging=jar \
             -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
             -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
-            || echo "ERROR: Failed to deploy trino-main (may already exist)"
-          echo "trino-main deployed successfully"
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
+            echo "trino-main deployed successfully"
+          else
+            echo "ERROR: Failed to deploy trino-main (may already exist)"
+          fi
         fi
       else
         echo "WARNING: trino-main JAR not found, skipping"
