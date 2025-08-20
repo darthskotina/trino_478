@@ -10,7 +10,7 @@
 
     <groupId>org.ebyhr</groupId>
     <artifactId>trino-storage</artifactId>
-    <version>475-SNAPSHOT</version>
+    <version>475</version>
     <packaging>trino-plugin</packaging>
     <description>Trino - Storage Connector</description>
 
