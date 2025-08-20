@@ -75,7 +75,7 @@ build-trino:
     - echo "Building Trino plugins and core components..."
     - |
       ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true \
-        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,core/trino-main \
+        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,plugin/trino-storage,core/trino-main \
         -am \
         -T 1C
 
@@ -84,6 +84,7 @@ build-trino:
     - mkdir -p artifacts/plugins/kafka
     - mkdir -p artifacts/plugins/delta-lake
     - mkdir -p artifacts/plugins/iceberg
+    - mkdir -p artifacts/plugins/storage
     - mkdir -p artifacts/core
 
     - |
@@ -115,6 +116,12 @@ build-trino:
         cp -r plugin/trino-iceberg/target/trino-iceberg-${TRINO_VERSION}/*.jar artifacts/plugins/iceberg/ || echo "No JARs found for iceberg"
       else
         echo "Iceberg plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-storage/target/trino-storage-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-storage/target/trino-storage-${TRINO_VERSION}/*.jar artifacts/plugins/storage/ || echo "No JARs found for storage"
+      else
+        echo "Storage plugin build directory not found"
       fi
 
     - |
@@ -213,7 +220,7 @@ deploy-to-artifactory-manual:
         fi
       }
 
-      for plugin in postgresql vertica kafka delta-lake iceberg; do
+      for plugin in postgresql vertica kafka delta-lake iceberg storage; do
         echo "=== Deploying $plugin plugin ==="
         PLUGIN_DIR="artifacts/plugins/$plugin"
 
