@@ -75,18 +75,28 @@ build-trino:
     - echo "Building Trino plugins and core components..."
     - |
       ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true \
-        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,plugin/trino-storage,core/trino-main \
+        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,plugin/trino-storage,plugin/trino-random-functions,plugin/trino-api,plugin/trino-big-sequence,plugin/trino-convert-to-western-digits,plugin/trino-jwt,core/trino-main \
         -am \
         -T 1C
 
+    # Create directories for standard plugins
     - mkdir -p artifacts/plugins/postgresql
     - mkdir -p artifacts/plugins/vertica
     - mkdir -p artifacts/plugins/kafka
     - mkdir -p artifacts/plugins/delta-lake
     - mkdir -p artifacts/plugins/iceberg
     - mkdir -p artifacts/plugins/storage
+
+    # Create directories for custom plugins
+    - mkdir -p artifacts/plugins/random-functions
+    - mkdir -p artifacts/plugins/api
+    - mkdir -p artifacts/plugins/big-sequence
+    - mkdir -p artifacts/plugins/convert-to-western-digits
+    - mkdir -p artifacts/plugins/jwt
+
     - mkdir -p artifacts/core
 
+    # Copy standard plugins (these have JARs in target/trino-{plugin}-{version}/ subdirectory)
     - |
       if [ -d "plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}" ]; then
         cp -r plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}/*.jar artifacts/plugins/postgresql/ || echo "No JARs found for postgresql"
@@ -124,6 +134,51 @@ build-trino:
         echo "Storage plugin build directory not found"
       fi
 
+    # Copy custom plugins (these have JARs directly in target/ directory with specific names)
+    - |
+      echo "=== Processing custom plugins ==="
+
+      # trino-random-functions
+      if [ -f "plugin/trino-random-functions/target/trino-random-functions-1.0.0.jar" ]; then
+        cp plugin/trino-random-functions/target/trino-random-functions-1.0.0.jar artifacts/plugins/random-functions/
+        echo "Custom plugin trino-random-functions copied successfully"
+      else
+        echo "WARNING: trino-random-functions JAR not found"
+      fi
+
+      # trino-api
+      if [ -f "plugin/trino-api/target/trino-api-plugin-1.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-api/target/trino-api-plugin-1.0-SNAPSHOT.jar artifacts/plugins/api/
+        echo "Custom plugin trino-api copied successfully"
+      else
+        echo "WARNING: trino-api JAR not found"
+      fi
+
+      # trino-big-sequence
+      if [ -f "plugin/trino-big-sequence/target/trino-big-sequence-1.0.0.jar" ]; then
+        cp plugin/trino-big-sequence/target/trino-big-sequence-1.0.0.jar artifacts/plugins/big-sequence/
+        echo "Custom plugin trino-big-sequence copied successfully"
+      else
+        echo "WARNING: trino-big-sequence JAR not found"
+      fi
+
+      # trino-convert-to-western-digits
+      if [ -f "plugin/trino-convert-to-western-digits/target/trino-convert-to-western-digits-plugin-1.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-convert-to-western-digits/target/trino-convert-to-western-digits-plugin-1.0-SNAPSHOT.jar artifacts/plugins/convert-to-western-digits/
+        echo "Custom plugin trino-convert-to-western-digits copied successfully"
+      else
+        echo "WARNING: trino-convert-to-western-digits JAR not found"
+      fi
+
+      # trino-jwt
+      if [ -f "plugin/trino-jwt/target/jwt-trino-plugin-1.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-jwt/target/jwt-trino-plugin-1.0-SNAPSHOT.jar artifacts/plugins/jwt/
+        echo "Custom plugin trino-jwt copied successfully"
+      else
+        echo "WARNING: trino-jwt JAR not found"
+      fi
+
+    # Copy core component
     - |
       if [ -f "core/trino-main/target/trino-main-${TRINO_VERSION}.jar" ]; then
         cp core/trino-main/target/trino-main-${TRINO_VERSION}.jar artifacts/core/
@@ -220,6 +275,8 @@ deploy-to-artifactory-manual:
         fi
       }
 
+      # Deploy standard plugins
+      echo "=== Deploying standard plugins ==="
       for plugin in postgresql vertica kafka delta-lake iceberg storage; do
         echo "=== Deploying $plugin plugin ==="
         PLUGIN_DIR="artifacts/plugins/$plugin"
@@ -264,6 +321,62 @@ deploy-to-artifactory-manual:
         fi
       done
 
+      # Deploy custom plugins
+      echo "=== Deploying custom plugins ==="
+      declare -A CUSTOM_PLUGINS=(
+        ["random-functions"]="random-functions"
+        ["api"]="api"
+        ["big-sequence"]="big-sequence"
+        ["convert-to-western-digits"]="convert-to-western-digits"
+        ["jwt"]="jwt"
+      )
+
+      for plugin_dir in "${!CUSTOM_PLUGINS[@]}"; do
+        plugin_name="${CUSTOM_PLUGINS[$plugin_dir]}"
+        echo "=== Deploying custom plugin: trino-${plugin_name} ==="
+        PLUGIN_DIR="artifacts/plugins/$plugin_dir"
+
+        if [ -d "$PLUGIN_DIR" ] && [ "$(ls -A $PLUGIN_DIR 2>/dev/null)" ]; then
+          if check_artifact_exists "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" "zip"; then
+            echo "WARNING: Artifact trino-${plugin_name}-complete version $ARTIFACT_VERSION already exists in Artifactory. Skipping..."
+            continue
+          fi
+
+          cd "$PLUGIN_DIR"
+          zip -r /tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip *.jar
+          cd -
+
+          cat > /tmp/pom-${plugin_name}.xml << EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <project>
+        <modelVersion>4.0.0</modelVersion>
+        <groupId>com.exness.trino</groupId>
+        <artifactId>trino-${plugin_name}-complete</artifactId>
+        <version>${ARTIFACT_VERSION}</version>
+        <packaging>zip</packaging>
+      </project>
+      EOF
+
+          echo "Deploying ZIP archive for custom plugin ${plugin_name}..."
+          if mvn deploy:deploy-file \
+            -DgroupId=com.exness.trino \
+            -DartifactId=trino-${plugin_name}-complete \
+            -Dversion=$ARTIFACT_VERSION \
+            -Dpackaging=zip \
+            -Dfile=/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip \
+            -DpomFile=/tmp/pom-${plugin_name}.xml \
+            -DrepositoryId=exness-artifactory \
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
+            echo "Successfully deployed trino-${plugin_name}-complete-${ARTIFACT_VERSION}.zip"
+          else
+            echo "ERROR: Failed to deploy custom plugin ${plugin_name} (may already exist)"
+          fi
+        else
+          echo "No JARs found for custom plugin $plugin_name"
+        fi
+      done
+
+      # Deploy core components
       echo "=== Deploying core components ==="
       if [ -f "artifacts/core/trino-main-${TRINO_VERSION}.jar" ]; then
         if check_artifact_exists "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" "jar"; then
@@ -291,6 +404,21 @@ deploy-to-artifactory-manual:
       echo "All artifacts have been deployed to:"
       echo "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/com/exness/trino/"
       echo "Version: $ARTIFACT_VERSION"
+      echo ""
+      echo "Standard plugins deployed:"
+      echo "  - trino-postgresql-complete"
+      echo "  - trino-vertica-complete"
+      echo "  - trino-kafka-complete"
+      echo "  - trino-delta-lake-complete"
+      echo "  - trino-iceberg-complete"
+      echo "  - trino-storage-complete"
+      echo ""
+      echo "Custom plugins deployed:"
+      echo "  - trino-random-functions-complete"
+      echo "  - trino-api-complete"
+      echo "  - trino-big-sequence-complete"
+      echo "  - trino-convert-to-western-digits-complete"
+      echo "  - trino-jwt-complete"
 
 deploy-to-artifactory-auto:
   extends: deploy-to-artifactory-manual
