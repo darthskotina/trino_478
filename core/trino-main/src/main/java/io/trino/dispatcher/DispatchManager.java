@@ -52,6 +52,7 @@ import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -95,6 +96,12 @@ public class DispatchManager
     private final QueryManagerStats stats = new QueryManagerStats();
     private final QueryMonitor queryMonitor;
     private final ScheduledExecutorService statsUpdaterExecutor;
+
+    private static String maskIfCreateCatalog(String sql)
+    {
+        String l = sql.toLowerCase(Locale.ENGLISH);
+        return (l.contains("create") && l.contains("catalog")) ? "create catalog ****" : sql;
+    }
 
     @Inject
     public DispatchManager(
@@ -243,7 +250,7 @@ public class DispatchManager
             DispatchQuery dispatchQuery = dispatchQueryFactory.createDispatchQuery(
                     session,
                     sessionContext.getTransactionId(),
-                    query,
+                    maskIfCreateCatalog(query),
                     preparedQuery,
                     slug,
                     selectionContext.getResourceGroupId());
@@ -270,7 +277,7 @@ public class DispatchManager
                         .build();
             }
             Optional<String> preparedSql = Optional.ofNullable(preparedQuery).flatMap(PreparedQuery::getPrepareSql);
-            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, query, preparedSql, Optional.empty(), throwable);
+            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, maskIfCreateCatalog(query), preparedSql, Optional.empty(), throwable);
             queryCreated(failedDispatchQuery);
             // maintain proper order of calls such that EventListener has access to QueryInfo
             // - add query to tracker
