@@ -426,6 +426,35 @@ deploy-to-artifactory-auto:
     - *version_setup_main
     - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
     - apt-get update -q && apt-get install -yq --no-install-recommends wget jq
+    - |
+      JFROG_ACCESS_TOKEN=$(wget --quiet \
+        --header="Content-Type: application/json" \
+        --post-data='{
+          "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+          "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+          "subject_token": "'$JFROG_ID_TOKEN'",
+          "provider_name": "gitlab-oidc"
+        }' \
+        --output-document - \
+        "https://${ARTIFACTORY_URL}/access/api/v1/oidc/token" | jq -r .access_token)
+    - mkdir -p ~/.m2
+    - |
+      cat > ~/.m2/settings.xml << EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                http://maven.apache.org/xsd/settings-1.0.0.xsd">
+        <servers>
+          <server>
+            <id>exness-artifactory</id>
+            <username>$GITLAB_USER_LOGIN</username>
+            <password>$JFROG_ACCESS_TOKEN</password>
+          </server>
+        </servers>
+      </settings>
+      EOF
+    - chmod 600 ~/.m2/settings.xml
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
       when: on_success
