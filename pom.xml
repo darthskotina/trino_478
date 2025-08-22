@@ -60,11 +60,14 @@
         <module>lib/trino-plugin-toolkit</module>
         <module>lib/trino-record-decoder</module>
         <module>plugin/trino-ai-functions</module>
+        <module>plugin/trino-api</module>
         <module>plugin/trino-base-jdbc</module>
+        <module>plugin/trino-big-sequence</module>
         <module>plugin/trino-bigquery</module>
         <module>plugin/trino-blackhole</module>
         <module>plugin/trino-cassandra</module>
         <module>plugin/trino-clickhouse</module>
+        <module>plugin/trino-convert-to-western-digits</module>
         <module>plugin/trino-delta-lake</module>
         <module>plugin/trino-druid</module>
         <module>plugin/trino-duckdb</module>
@@ -85,6 +88,7 @@
         <module>plugin/trino-iceberg</module>
         <module>plugin/trino-ignite</module>
         <module>plugin/trino-jmx</module>
+        <module>plugin/trino-jwt</module>
         <module>plugin/trino-kafka</module>
         <module>plugin/trino-kafka-event-listener</module>
         <module>plugin/trino-ldap-group-provider</module>
@@ -103,6 +107,7 @@
         <module>plugin/trino-pinot</module>
         <module>plugin/trino-postgresql</module>
         <module>plugin/trino-prometheus</module>
+        <module>plugin/trino-random-functions</module>
         <module>plugin/trino-ranger</module>
         <module>plugin/trino-redis</module>
         <module>plugin/trino-redshift</module>
@@ -112,6 +117,7 @@
         <module>plugin/trino-snowflake</module>
         <module>plugin/trino-spooling-filesystem</module>
         <module>plugin/trino-sqlserver</module>
+        <module>plugin/trino-storage</module>
         <module>plugin/trino-teradata-functions</module>
         <module>plugin/trino-thrift</module>
         <module>plugin/trino-thrift-api</module>
