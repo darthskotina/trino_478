@@ -16,7 +16,6 @@ package io.trino.plugin.vertica;
 import com.vertica.core.VConnectionPropertyKey;
 import com.vertica.core.VDriver;
 import com.vertica.jdbc.hybrid.HybridAbstractDriver;
-import com.vertica.utilities.JDBCVersion;
 
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
@@ -32,11 +31,13 @@ import java.util.logging.Logger;
 public class VerticaDriver
         extends HybridAbstractDriver
 {
-    @Override
-    protected JDBCVersion runningJDBCVersion()
-    {
-        return JDBCVersion.JDBC42;
-    }
+    // Method removed in Vertica JDBC 25.3.0-0
+    // The driver now automatically detects the JDBC version
+    // @Override
+    // protected JDBCVersion runningJDBCVersion()
+    // {
+    //     return JDBCVersion.JDBC42;
+    // }
 
     @Override
     protected String getSubProtocol()
