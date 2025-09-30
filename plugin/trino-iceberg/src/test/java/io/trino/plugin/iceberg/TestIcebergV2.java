@@ -30,7 +30,6 @@ import io.trino.metastore.Storage;
 import io.trino.plugin.hive.HiveStorageFormat;
 import io.trino.plugin.hive.TestingHivePlugin;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
-import io.trino.plugin.iceberg.fileio.ForwardingFileIo;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
@@ -71,6 +70,7 @@ import org.apache.iceberg.mapping.MappingUtil;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
@@ -91,6 +91,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
+import static io.trino.plugin.iceberg.IcebergTestUtils.FILE_IO_FACTORY;
+import static io.trino.plugin.iceberg.IcebergTestUtils.SESSION;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getFileSystemFactory;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getHiveMetastore;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getMetadataFileAndUpdatedMillis;
@@ -100,7 +103,6 @@ import static io.trino.plugin.iceberg.util.EqualityDeleteUtils.writeEqualityDele
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.testing.MaterializedResult.resultBuilder;
-import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.tpch.TpchTable.NATION;
 import static java.lang.String.format;
@@ -115,6 +117,7 @@ import static org.apache.iceberg.TableProperties.DEFAULT_NAME_MAPPING;
 import static org.apache.iceberg.TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED;
 import static org.apache.iceberg.TableProperties.METADATA_PREVIOUS_VERSIONS_MAX;
 import static org.apache.iceberg.TableProperties.SPLIT_SIZE;
+import static org.apache.iceberg.TableUtil.formatVersion;
 import static org.apache.iceberg.mapping.NameMappingParser.toJson;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -152,11 +155,11 @@ public class TestIcebergV2
     {
         String tableName = "test_seting_format_version_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 2) AS SELECT * FROM tpch.tiny.nation", 25);
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(2);
         assertUpdate("DROP TABLE " + tableName);
 
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 1) AS SELECT * FROM tpch.tiny.nation", 25);
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(1);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(1);
         assertUpdate("DROP TABLE " + tableName);
     }
 
@@ -165,7 +168,7 @@ public class TestIcebergV2
     {
         String tableName = "test_default_format_version_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " AS SELECT * FROM tpch.tiny.nation", 25);
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(2);
         assertUpdate("DROP TABLE " + tableName);
     }
 
@@ -228,10 +231,10 @@ public class TestIcebergV2
 
         String dataFilePath = (String) computeActual("SELECT file_path FROM \"" + tableName + "$files\" LIMIT 1").getOnlyValue();
 
-        FileIO fileIo = new ForwardingFileIo(fileSystemFactory.create(SESSION));
+        FileIO fileIo = FILE_IO_FACTORY.create(fileSystemFactory.create(SESSION));
 
         PositionDeleteWriter<Record> writer = Parquet.writeDeletes(fileIo.newOutputFile("local:///delete_file_" + UUID.randomUUID()))
-                .createWriterFunc(GenericParquetWriter::buildWriter)
+                .createWriterFunc(GenericParquetWriter::create)
                 .forTable(icebergTable)
                 .overwrite()
                 .rowSchema(icebergTable.schema())
@@ -685,9 +688,9 @@ public class TestIcebergV2
     {
         String tableName = "test_upgrade_table_to_v2_from_trino_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 1) AS SELECT * FROM tpch.tiny.nation", 25);
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(1);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(1);
         assertUpdate("ALTER TABLE " + tableName + " SET PROPERTIES format_version = 2");
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(2);
         assertQuery("SELECT * FROM " + tableName, "SELECT * FROM nation");
     }
 
@@ -696,7 +699,7 @@ public class TestIcebergV2
     {
         String tableName = "test_downgrading_v2_table_to_v1_fails_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 2) AS SELECT * FROM tpch.tiny.nation", 25);
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(2);
         assertThat(query("ALTER TABLE " + tableName + " SET PROPERTIES format_version = 1"))
                 .failure()
                 .hasMessage("Failed to set new property values")
@@ -709,7 +712,7 @@ public class TestIcebergV2
     {
         String tableName = "test_upgrading_to_invalid_version_fails_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 2) AS SELECT * FROM tpch.tiny.nation", 25);
-        assertThat(loadTable(tableName).operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(loadTable(tableName))).isEqualTo(2);
         assertThat(query("ALTER TABLE " + tableName + " SET PROPERTIES format_version = 42"))
                 .failure().hasMessage("line 1:79: Unable to set catalog 'iceberg' table property 'format_version' to [42]: format_version must be between 1 and 2");
     }
@@ -720,13 +723,13 @@ public class TestIcebergV2
         String tableName = "test_updating_all_table_properties_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 1, format = 'ORC') AS SELECT * FROM tpch.tiny.nation", 25);
         BaseTable table = loadTable(tableName);
-        assertThat(table.operations().current().formatVersion()).isEqualTo(1);
+        assertThat(formatVersion(table)).isEqualTo(1);
         assertThat(table.properties().get(TableProperties.DEFAULT_FILE_FORMAT).equalsIgnoreCase("ORC")).isTrue();
         assertThat(table.spec().isUnpartitioned()).isTrue();
 
         assertUpdate("ALTER TABLE " + tableName + " SET PROPERTIES format_version = 2, partitioning = ARRAY['regionkey'], format = 'PARQUET', sorted_by = ARRAY['comment']");
         table = loadTable(tableName);
-        assertThat(table.operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(table)).isEqualTo(2);
         assertThat(table.properties().get(TableProperties.DEFAULT_FILE_FORMAT).equalsIgnoreCase("PARQUET")).isTrue();
         assertThat(table.spec().isPartitioned()).isTrue();
         List<PartitionField> partitionFields = table.spec().fields();
@@ -747,7 +750,7 @@ public class TestIcebergV2
         assertUpdate("CREATE TABLE " + tableName + " WITH (format_version = 1, format = 'PARQUET', partitioning = ARRAY['regionkey'], sorted_by = ARRAY['comment']) " +
                 "AS SELECT * FROM tpch.tiny.nation", 25);
         BaseTable table = loadTable(tableName);
-        assertThat(table.operations().current().formatVersion()).isEqualTo(1);
+        assertThat(formatVersion(table)).isEqualTo(1);
         assertThat(table.properties().get(TableProperties.DEFAULT_FILE_FORMAT).equalsIgnoreCase("PARQUET")).isTrue();
         assertThat(table.spec().isPartitioned()).isTrue();
         List<PartitionField> partitionFields = table.spec().fields();
@@ -757,7 +760,7 @@ public class TestIcebergV2
 
         assertUpdate("ALTER TABLE " + tableName + " SET PROPERTIES format_version = DEFAULT, format = DEFAULT, partitioning = DEFAULT, sorted_by = DEFAULT");
         table = loadTable(tableName);
-        assertThat(table.operations().current().formatVersion()).isEqualTo(2);
+        assertThat(formatVersion(table)).isEqualTo(2);
         assertThat(table.properties().get(TableProperties.DEFAULT_FILE_FORMAT).equalsIgnoreCase("PARQUET")).isTrue();
         assertThat(table.spec().isUnpartitioned()).isTrue();
         assertThat(table.sortOrder().isUnsorted()).isTrue();
@@ -929,7 +932,7 @@ public class TestIcebergV2
                                         (2,
                                         'PARQUET',
                                         1L,
-                                        JSON '{"3":49}',
+                                        JSON '{"3":52}',
                                         JSON '{"3":1}',
                                         JSON '{"3":0}',
                                         JSON '{}',
@@ -959,6 +962,7 @@ public class TestIcebergV2
                     TupleDomain.all(),
                     ImmutableSet.of(),
                     true,
+                    newDirectExecutorService(),
                     fileSystemFactory.create(SESSION));
             assertThat(withNoFilter.getRowCount().getValue()).isEqualTo(4.0);
 
@@ -967,15 +971,16 @@ public class TestIcebergV2
                     table,
                     snapshotId,
                     TupleDomain.withColumnDomains(ImmutableMap.of(
-                            new IcebergColumnHandle(ColumnIdentity.primitiveColumnIdentity(2, "b"), INTEGER, ImmutableList.of(), INTEGER, true, Optional.empty()),
+                            IcebergColumnHandle.optional(ColumnIdentity.primitiveColumnIdentity(2, "b")).columnType(INTEGER).build(),
                             Domain.singleValue(INTEGER, 10L))),
                     TupleDomain.all(),
                     ImmutableSet.of(),
                     true,
+                    newDirectExecutorService(),
                     fileSystemFactory.create(SESSION));
             assertThat(withPartitionFilter.getRowCount().getValue()).isEqualTo(3.0);
 
-            IcebergColumnHandle column = new IcebergColumnHandle(ColumnIdentity.primitiveColumnIdentity(1, "a"), INTEGER, ImmutableList.of(), INTEGER, true, Optional.empty());
+            IcebergColumnHandle column = IcebergColumnHandle.optional(ColumnIdentity.primitiveColumnIdentity(1, "a")).columnType(INTEGER).build();
             TableStatistics withUnenforcedFilter = TableStatisticsReader.makeTableStatistics(
                     typeManager,
                     table,
@@ -986,6 +991,7 @@ public class TestIcebergV2
                             Domain.create(ValueSet.ofRanges(Range.greaterThan(INTEGER, 100L)), true))),
                     ImmutableSet.of(column),
                     true,
+                    newDirectExecutorService(),
                     fileSystemFactory.create(SESSION));
             assertThat(withUnenforcedFilter.getRowCount().getValue()).isEqualTo(2.0);
         }
@@ -1009,11 +1015,12 @@ public class TestIcebergV2
                     TupleDomain.all(),
                     ImmutableSet.of(),
                     true,
+                    newDirectExecutorService(),
                     fileSystemFactory.create(SESSION));
             assertThat(withNoProjectedColumns.getRowCount().getValue()).isEqualTo(4.0);
             assertThat(withNoProjectedColumns.getColumnStatistics()).isEmpty();
 
-            IcebergColumnHandle column = new IcebergColumnHandle(ColumnIdentity.primitiveColumnIdentity(1, "a"), INTEGER, ImmutableList.of(), INTEGER, true, Optional.empty());
+            IcebergColumnHandle column = IcebergColumnHandle.optional(ColumnIdentity.primitiveColumnIdentity(1, "a")).columnType(INTEGER).build();
             TableStatistics withProjectedColumns = TableStatisticsReader.makeTableStatistics(
                     typeManager,
                     table,
@@ -1022,6 +1029,7 @@ public class TestIcebergV2
                     TupleDomain.all(),
                     ImmutableSet.of(column),
                     true,
+                    newDirectExecutorService(),
                     fileSystemFactory.create(SESSION));
             assertThat(withProjectedColumns.getRowCount().getValue()).isEqualTo(4.0);
             assertThat(withProjectedColumns.getColumnStatistics()).containsOnlyKeys(column);
@@ -1038,10 +1046,11 @@ public class TestIcebergV2
                     snapshotId,
                     TupleDomain.all(),
                     TupleDomain.withColumnDomains(ImmutableMap.of(
-                            new IcebergColumnHandle(ColumnIdentity.primitiveColumnIdentity(2, "b"), INTEGER, ImmutableList.of(), INTEGER, true, Optional.empty()),
+                            IcebergColumnHandle.optional(ColumnIdentity.primitiveColumnIdentity(2, "b")).columnType(INTEGER).build(),
                             Domain.singleValue(INTEGER, 10L))),
                     ImmutableSet.of(column),
                     true,
+                    newDirectExecutorService(),
                     fileSystemFactory.create(SESSION));
             assertThat(withPartitionFilterAndProjectedColumn.getRowCount().getValue()).isEqualTo(3.0);
             assertThat(withPartitionFilterAndProjectedColumn.getColumnStatistics()).containsOnlyKeys(column);
@@ -1396,7 +1405,7 @@ public class TestIcebergV2
     {
         testMapValueSchemaChange("PARQUET", "map(array[1], array[NULL])");
         testMapValueSchemaChange("ORC", "map(array[1], array[row(NULL)])");
-        testMapValueSchemaChange("AVRO", "NULL");
+        testMapValueSchemaChange("AVRO", "map(array[1], array[row(NULL)])");
     }
 
     private void testMapValueSchemaChange(String format, String expectedValue)
@@ -1433,6 +1442,7 @@ public class TestIcebergV2
     }
 
     @Test
+    @Disabled // TODO https://github.com/trinodb/trino/issues/24539 Fix flaky test
     void testEnvironmentContext()
     {
         try (TestTable table = newTrinoTable("test_environment_context", "(x int)")) {

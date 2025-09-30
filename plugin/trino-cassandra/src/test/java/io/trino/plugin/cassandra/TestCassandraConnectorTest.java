@@ -94,6 +94,7 @@ public class TestCassandraConnectorTest
                  SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT,
                  SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT,
                  SUPPORTS_CREATE_VIEW,
+                 SUPPORTS_DEFAULT_COLUMN_VALUE,
                  SUPPORTS_MAP_TYPE,
                  SUPPORTS_MERGE,
                  SUPPORTS_NOT_NULL_CONSTRAINT,
@@ -1856,13 +1857,6 @@ public class TestCassandraConnectorTest
                         "FROM nation c JOIN tpch.tiny.region t ON c.regionkey = t.regionkey " +
                         "WHERE c.nationkey = 3",
                 "VALUES ('CANADA', 'AMERICA')");
-    }
-
-    @Test
-    public void testProtocolVersion()
-    {
-        assertQuery("SELECT native_protocol_version FROM system.local",
-                "VALUES 4");
     }
 
     private void assertSelect(String tableName)

@@ -13,22 +13,25 @@
  */
 package io.trino.filesystem.s3;
 
+import com.google.common.io.Closer;
 import io.airlift.units.DataSize;
 import io.opentelemetry.api.OpenTelemetry;
+import io.trino.filesystem.Location;
 import io.trino.testing.containers.Minio;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.List;
 
+import static io.trino.filesystem.s3.S3FileSystem.DELETE_BATCH_SIZE;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static software.amazon.awssdk.core.checksums.ResponseChecksumValidation.WHEN_REQUIRED;
 
 public class TestS3FileSystemMinIo
         extends AbstractTestS3FileSystem
@@ -67,8 +70,6 @@ public class TestS3FileSystemMinIo
                 .endpointOverride(URI.create(minio.getMinioAddress()))
                 .region(Region.of(Minio.MINIO_REGION))
                 .forcePathStyle(true)
-                .responseChecksumValidation(WHEN_REQUIRED)
-                .requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create(Minio.MINIO_ACCESS_KEY, Minio.MINIO_SECRET_KEY)))
                 .build();
@@ -122,5 +123,24 @@ public class TestS3FileSystemMinIo
     {
         // MinIO is not hierarchical but has hierarchical naming constraints. For example it's not possible to have two blobs "level0" and "level0/level1".
         testListDirectories(true);
+    }
+
+    @Test
+    void testDeleteManyFiles()
+            throws IOException
+    {
+        try (Closer closer = Closer.create()) {
+            // create a large number of files to test batch deletion over multiple batches
+            // we run this test only on MinIO to avoid API costs and long execution time on AWS S3
+            List<TempBlob> blobs = randomBlobs(closer, DELETE_BATCH_SIZE + 100);
+            List<Location> locations = blobs.stream()
+                    .map(TempBlob::location)
+                    .toList();
+
+            getFileSystem().deleteFiles(locations);
+            for (Location location : locations) {
+                assertThat(getFileSystem().newInputFile(location).exists()).isFalse();
+            }
+        }
     }
 }

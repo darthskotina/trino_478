@@ -36,7 +36,7 @@ import static org.apache.iceberg.aws.AwsProperties.REST_SIGNER_REGION;
 import static org.apache.iceberg.aws.AwsProperties.REST_SIGNING_NAME;
 
 public class SigV4AwsProperties
-        implements AwsProperties
+        implements SecurityProperties
 {
     // Copy of `org.apache.iceberg.aws.AwsClientProperties.CLIENT_CREDENTIAL_PROVIDER_PREFIX` https://github.com/apache/iceberg/blob/ab6fc83ec0269736355a0a89c51e44e822264da8/aws/src/main/java/org/apache/iceberg/aws/AwsClientProperties.java#L69
     private static final String CLIENT_CREDENTIAL_PROVIDER_PREFIX = "client.credentials-provider.";
@@ -57,7 +57,7 @@ public class SigV4AwsProperties
     public SigV4AwsProperties(IcebergRestCatalogSigV4Config sigV4Config, S3FileSystemConfig s3Config)
     {
         ImmutableMap.Builder<String, String> builder = ImmutableMap.<String, String>builder()
-                .put("rest.sigv4-enabled", "true")
+                .put("rest.auth.type", "sigv4")
                 .put(REST_SIGNING_NAME, sigV4Config.getSigningName())
                 .put(REST_SIGNER_REGION, requireNonNull(s3Config.getRegion(), "s3.region is null"))
                 .put("rest-metrics-reporting-enabled", "false");

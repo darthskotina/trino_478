@@ -23,7 +23,7 @@ import io.trino.plugin.iceberg.ColumnIdentity;
 import io.trino.plugin.iceberg.IcebergMaterializedViewDefinition;
 import io.trino.plugin.iceberg.IcebergUtil;
 import io.trino.plugin.iceberg.PartitionTransforms.ColumnTransform;
-import io.trino.plugin.iceberg.fileio.ForwardingFileIo;
+import io.trino.plugin.iceberg.fileio.ForwardingFileIoFactory;
 import io.trino.plugin.iceberg.fileio.ForwardingOutputFile;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
@@ -77,6 +77,7 @@ import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static io.trino.plugin.iceberg.IcebergMaterializedViewDefinition.decodeMaterializedViewData;
 import static io.trino.plugin.iceberg.IcebergMaterializedViewProperties.STORAGE_SCHEMA;
 import static io.trino.plugin.iceberg.IcebergMaterializedViewProperties.getStorageSchema;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.isUseFileSizeFromMetadata;
 import static io.trino.plugin.iceberg.IcebergTableName.tableNameWithType;
 import static io.trino.plugin.iceberg.IcebergTableProperties.getPartitioning;
 import static io.trino.plugin.iceberg.IcebergTableProperties.getSortOrder;
@@ -120,23 +121,26 @@ public abstract class AbstractTrinoCatalog
     protected static final String TRINO_QUERY_ID_NAME = HiveMetadata.TRINO_QUERY_ID_NAME;
 
     private final CatalogName catalogName;
+    private final boolean useUniqueTableLocation;
     protected final TypeManager typeManager;
     protected final IcebergTableOperationsProvider tableOperationsProvider;
-    private final TrinoFileSystemFactory fileSystemFactory;
-    private final boolean useUniqueTableLocation;
+    protected final TrinoFileSystemFactory fileSystemFactory;
+    protected final ForwardingFileIoFactory fileIoFactory;
 
     protected AbstractTrinoCatalog(
             CatalogName catalogName,
+            boolean useUniqueTableLocation,
             TypeManager typeManager,
             IcebergTableOperationsProvider tableOperationsProvider,
             TrinoFileSystemFactory fileSystemFactory,
-            boolean useUniqueTableLocation)
+            ForwardingFileIoFactory fileIoFactory)
     {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        this.useUniqueTableLocation = useUniqueTableLocation;
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.tableOperationsProvider = requireNonNull(tableOperationsProvider, "tableOperationsProvider is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
-        this.useUniqueTableLocation = useUniqueTableLocation;
+        this.fileIoFactory = requireNonNull(fileIoFactory, "fileIoFactory is null");
     }
 
     @Override
@@ -308,7 +312,7 @@ public abstract class AbstractTrinoCatalog
         Schema schema = schemaFromMetadata(columns);
         PartitionSpec partitionSpec = parsePartitionFields(schema, getPartitioning(materializedViewProperties));
         SortOrder sortOrder = parseSortFields(schema, getSortOrder(materializedViewProperties));
-        Map<String, String> properties = createTableProperties(session, new ConnectorTableMetadata(storageTableName, columns, materializedViewProperties, Optional.empty()), _ -> false);
+        Map<String, String> properties = createTableProperties(new ConnectorTableMetadata(storageTableName, columns, materializedViewProperties, Optional.empty()), _ -> false);
 
         TableMetadata metadata = newTableMetadata(schema, partitionSpec, sortOrder, tableLocation, properties);
 
@@ -321,10 +325,10 @@ public abstract class AbstractTrinoCatalog
         return metadataFileLocation;
     }
 
-    protected void dropMaterializedViewStorage(TrinoFileSystem fileSystem, String storageMetadataLocation)
+    protected void dropMaterializedViewStorage(ConnectorSession session, TrinoFileSystem fileSystem, String storageMetadataLocation)
             throws IOException
     {
-        TableMetadata metadata = TableMetadataParser.read(new ForwardingFileIo(fileSystem), storageMetadataLocation);
+        TableMetadata metadata = TableMetadataParser.read(fileIoFactory.create(fileSystem, isUseFileSizeFromMetadata(session)), storageMetadataLocation);
         String storageLocation = metadata.location();
         fileSystem.deleteDirectory(Location.of(storageLocation));
     }

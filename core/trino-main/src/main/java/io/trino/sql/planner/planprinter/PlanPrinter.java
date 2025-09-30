@@ -35,6 +35,7 @@ import io.trino.execution.DistributionSnapshot;
 import io.trino.execution.QueryStats;
 import io.trino.execution.StageInfo;
 import io.trino.execution.StageStats;
+import io.trino.execution.StagesInfo;
 import io.trino.execution.TableInfo;
 import io.trino.execution.TaskInfo;
 import io.trino.metadata.FunctionManager;
@@ -47,6 +48,7 @@ import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.function.table.Argument;
 import io.trino.spi.function.table.DescriptorArgument;
 import io.trino.spi.function.table.ScalarArgument;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.Range;
@@ -143,6 +145,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -156,7 +159,6 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.json.JsonCodec.mapJsonCodec;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.airlift.units.Duration.succinctNanos;
-import static io.trino.execution.StageInfo.getAllStages;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.metadata.GlobalFunctionCatalog.isBuiltinFunctionName;
 import static io.trino.metadata.LanguageFunctionManager.isInlineFunction;
@@ -192,6 +194,8 @@ public class PlanPrinter
     private final PlanRepresentation representation;
     private final Function<TableScanNode, TableInfo> tableInfoSupplier;
     private final Map<DynamicFilterId, DynamicFilterDomainStats> dynamicFilterDomainStats;
+    private final Map<PlanNodeId, Long> getSplitsTotalTimeNanos;
+    private final Map<PlanNodeId, Metrics> splitSourceMetrics;
     private final ValuePrinter valuePrinter;
     private final Anonymizer anonymizer;
 
@@ -204,18 +208,24 @@ public class PlanPrinter
             ValuePrinter valuePrinter,
             StatsAndCosts estimatedStatsAndCosts,
             Optional<Map<PlanNodeId, PlanNodeStats>> stats,
+            Map<PlanNodeId, Long> getSplitsTotalTimeNanos,
+            Map<PlanNodeId, Metrics> splitSourceMetrics,
             Anonymizer anonymizer)
     {
         requireNonNull(planRoot, "planRoot is null");
         requireNonNull(tableInfoSupplier, "tableInfoSupplier is null");
         requireNonNull(dynamicFilterDomainStats, "dynamicFilterDomainStats is null");
         requireNonNull(valuePrinter, "valuePrinter is null");
+        requireNonNull(getSplitsTotalTimeNanos, "getSplitsTotalTimeNanos is null");
+        requireNonNull(splitSourceMetrics, "splitSourceMetrics is null");
         requireNonNull(estimatedStatsAndCosts, "estimatedStatsAndCosts is null");
         requireNonNull(stats, "stats is null");
         requireNonNull(anonymizer, "anonymizer is null");
 
         this.tableInfoSupplier = tableInfoSupplier;
         this.dynamicFilterDomainStats = ImmutableMap.copyOf(dynamicFilterDomainStats);
+        this.getSplitsTotalTimeNanos = ImmutableMap.copyOf(getSplitsTotalTimeNanos);
+        this.splitSourceMetrics = ImmutableMap.copyOf(splitSourceMetrics);
         this.valuePrinter = valuePrinter;
         this.anonymizer = anonymizer;
 
@@ -264,6 +274,8 @@ public class PlanPrinter
                 valuePrinter,
                 StatsAndCosts.empty(),
                 Optional.empty(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
                 new NoOpAnonymizer())
                 .toJson();
     }
@@ -284,26 +296,27 @@ public class PlanPrinter
                 valuePrinter,
                 estimatedStatsAndCosts,
                 Optional.empty(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
                 new NoOpAnonymizer())
                 .toJson();
     }
 
     public static String jsonDistributedPlan(
-            StageInfo outputStageInfo,
+            StagesInfo stages,
             Session session,
             Metadata metadata,
             FunctionManager functionManager,
             Anonymizer anonymizer)
     {
-        List<StageInfo> allStages = getAllStages(Optional.of(outputStageInfo));
-        Map<PlanNodeId, TableInfo> tableInfos = allStages.stream()
+        Map<PlanNodeId, TableInfo> tableInfos = stages.getStages().stream()
                 .map(StageInfo::getTables)
                 .map(Map::entrySet)
                 .flatMap(Collection::stream)
                 .collect(toImmutableMap(Entry::getKey, Entry::getValue));
 
         ValuePrinter valuePrinter = new ValuePrinter(metadata, functionManager, session);
-        List<PlanFragment> planFragments = allStages.stream()
+        List<PlanFragment> planFragments = stages.getStages().stream()
                 .map(StageInfo::getPlan)
                 .filter(Objects::nonNull)
                 .collect(toImmutableList());
@@ -342,6 +355,8 @@ public class PlanPrinter
                                 valuePrinter,
                                 planFragment.getStatsAndCosts(),
                                 Optional.empty(),
+                                ImmutableMap.of(),
+                                ImmutableMap.of(),
                                 anonymizer)
                                 .toJsonRenderedNode()));
         return DISTRIBUTED_PLAN_CODEC.toJson(anonymizedPlan);
@@ -380,13 +395,15 @@ public class PlanPrinter
                 valuePrinter,
                 estimatedStatsAndCosts,
                 Optional.empty(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
                 new NoOpAnonymizer())
                 .toText(verbose, level));
         return builder.toString();
     }
 
     public static String textDistributedPlan(
-            StageInfo outputStageInfo,
+            StagesInfo stages,
             QueryStats queryStats,
             Metadata metadata,
             FunctionManager functionManager,
@@ -395,7 +412,7 @@ public class PlanPrinter
             NodeVersion version)
     {
         return textDistributedPlan(
-                outputStageInfo,
+                stages,
                 queryStats,
                 new ValuePrinter(metadata, functionManager, session),
                 verbose,
@@ -404,22 +421,44 @@ public class PlanPrinter
     }
 
     public static String textDistributedPlan(
-            StageInfo outputStageInfo,
+            StagesInfo stages,
             QueryStats queryStats,
             ValuePrinter valuePrinter,
             boolean verbose,
             Anonymizer anonymizer,
             NodeVersion version)
     {
-        List<StageInfo> allStages = getAllStages(Optional.of(outputStageInfo));
-        Map<PlanNodeId, TableInfo> tableInfos = allStages.stream()
+        return textDistributedPlan(stages.getStages(), queryStats, valuePrinter, verbose, anonymizer, version);
+    }
+
+    public static String textDistributedPlan(
+            List<StageInfo> stages,
+            QueryStats queryStats,
+            Metadata metadata,
+            FunctionManager functionManager,
+            Session session,
+            boolean verbose,
+            NodeVersion version)
+    {
+        return textDistributedPlan(
+                stages,
+                queryStats,
+                new ValuePrinter(metadata, functionManager, session),
+                verbose,
+                new NoOpAnonymizer(),
+                version);
+    }
+
+    public static String textDistributedPlan(List<StageInfo> stages, QueryStats queryStats, ValuePrinter valuePrinter, boolean verbose, Anonymizer anonymizer, NodeVersion version)
+    {
+        Map<PlanNodeId, TableInfo> tableInfos = stages.stream()
                 .map(StageInfo::getTables)
                 .map(Map::entrySet)
                 .flatMap(Collection::stream)
                 .collect(toImmutableMap(Entry::getKey, Entry::getValue));
 
         StringBuilder builder = new StringBuilder();
-        Map<PlanNodeId, PlanNodeStats> aggregatedStats = aggregateStageStats(allStages);
+        Map<PlanNodeId, PlanNodeStats> aggregatedStats = aggregateStageStats(stages);
 
         Map<DynamicFilterId, DynamicFilterDomainStats> dynamicFilterDomainStats = queryStats.getDynamicFiltersStats()
                 .getDynamicFilterDomainStats().stream()
@@ -432,7 +471,10 @@ public class PlanPrinter
                 queryStats.getPlanningTime().convertToMostSuccinctTimeUnit(),
                 queryStats.getExecutionTime().convertToMostSuccinctTimeUnit()));
 
-        for (StageInfo stageInfo : allStages) {
+        for (StageInfo stageInfo : stages) {
+            if (stageInfo.getPlan() == null) {
+                continue;
+            }
             builder.append(formatFragment(
                     tableScanNode -> tableInfos.get(tableScanNode.getId()),
                     dynamicFilterDomainStats,
@@ -504,10 +546,6 @@ public class PlanPrinter
                             stageStats.getPeakUserMemoryReservation().succinct(),
                             tasks.size(),
                             maxPeakTaskMemoryUsage.succinct()));
-            if (stageStats.getGetSplitDistribution().getTotal() > 0) {
-                builder.append(indentString(1))
-                        .append(format("Total split distribution time: %sms\n", formatDouble(stageStats.getGetSplitDistribution().getTotal() / 1_000_000)));
-            }
             Optional<DistributionSnapshot> outputBufferUtilization = stageInfo.get().getStageStats().getOutputBufferUtilization();
             if (verbose && outputBufferUtilization.isPresent()) {
                 builder.append(indentString(1))
@@ -565,22 +603,25 @@ public class PlanPrinter
                 })
                 .collect(toImmutableList());
         builder.append(indentString(1));
-        String hashColumn = partitioningScheme.getHashColumn().map(anonymizer::anonymize).map(column -> "[" + column + "]").orElse("");
         if (replicateNullsAndAny) {
-            builder.append(format("Output partitioning: %s (replicate nulls and any) [%s]%s",
+            builder.append(format("Output partitioning: %s (replicate nulls and any) [%s]",
                     anonymizer.anonymize(partitioningScheme.getPartitioning().getHandle()),
-                    Joiner.on(", ").join(arguments),
-                    hashColumn));
+                    Joiner.on(", ").join(arguments)));
         }
         else {
-            builder.append(format("Output partitioning: %s [%s]%s\n",
+            builder.append(format("Output partitioning: %s [%s]\n",
                     anonymizer.anonymize(partitioningScheme.getPartitioning().getHandle()),
-                    Joiner.on(", ").join(arguments),
-                    hashColumn));
+                    Joiner.on(", ").join(arguments)));
         }
         partitioningScheme.getPartitionCount().ifPresent(partitionCount -> builder.append(format("%sOutput partition count: %s\n", indentString(1), partitionCount)));
         fragment.getPartitionCount().ifPresent(partitionCount -> builder.append(format("%sInput partition count: %s\n", indentString(1), partitionCount)));
 
+        Map<PlanNodeId, Long> getSplitsTotalTimeNanos = stageInfo.map(info -> info.getStageStats().getGetSplitDistribution()
+                        .entrySet().stream()
+                        .collect(toImmutableMap(Entry::getKey, entry -> (long) entry.getValue().total())))
+                .orElse(ImmutableMap.of());
+        Map<PlanNodeId, Metrics> splitSourceMetrics = stageInfo.map(info -> info.getStageStats().getSplitSourceMetrics())
+                .orElse(ImmutableMap.of());
         builder.append(
                         new PlanPrinter(
                                 fragment.getRoot(),
@@ -589,6 +630,8 @@ public class PlanPrinter
                                 valuePrinter,
                                 fragment.getStatsAndCosts(),
                                 planNodeStats,
+                                getSplitsTotalTimeNanos,
+                                splitSourceMetrics,
                                 anonymizer).toText(verbose, 1))
                 .append("\n");
 
@@ -622,6 +665,7 @@ public class PlanPrinter
                 Optional.empty(),
                 ImmutableList.of(plan.getId()),
                 new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), plan.getOutputSymbols()),
+                OptionalInt.empty(),
                 StatsAndCosts.empty(),
                 ImmutableList.of(),
                 ImmutableMap.of(),
@@ -670,9 +714,13 @@ public class PlanPrinter
                 ImmutableMap.Builder<String, String> descriptor = ImmutableMap.<String, String>builder()
                         .put("criteria", Joiner.on(" AND ").join(anonymizeExpressions(criteriaExpressions)));
                 node.getFilter().ifPresent(filter -> descriptor.put("filter", formatFilter(filter)));
-                descriptor.put("hash", formatHash(node.getLeftHashSymbol(), node.getRightHashSymbol()));
                 node.getDistributionType().ifPresent(distribution -> descriptor.put("distribution", distribution.name()));
-                nodeOutput = addNode(node, node.getType().getJoinLabel(), descriptor.buildOrThrow(), node.getReorderJoinStatsAndCost(), context);
+                nodeOutput = addNode(
+                        node,
+                        node.getType().getJoinLabel(),
+                        descriptor.buildOrThrow(),
+                        node.getSources(),
+                        node.getReorderJoinStatsAndCost(), context);
             }
 
             node.getDistributionType().ifPresent(distributionType -> nodeOutput.appendDetails("Distribution: %s", distributionType));
@@ -709,8 +757,7 @@ public class PlanPrinter
             NodeRepresentation nodeOutput = addNode(node,
                     "SemiJoin",
                     ImmutableMap.of(
-                            "criteria", anonymizer.anonymize(node.getSourceJoinSymbol()) + " = " + anonymizer.anonymize(node.getFilteringSourceJoinSymbol()),
-                            "hash", formatHash(node.getSourceHashSymbol(), node.getFilteringSourceHashSymbol())),
+                            "criteria", anonymizer.anonymize(node.getSourceJoinSymbol()) + " = " + anonymizer.anonymize(node.getFilteringSourceJoinSymbol())),
                     context);
             node.getDistributionType().ifPresent(distributionType -> nodeOutput.appendDetails("Distribution: %s", distributionType));
             node.getDynamicFilterId().ifPresent(dynamicFilterId -> nodeOutput.appendDetails("dynamicFilterId: %s", dynamicFilterId));
@@ -763,8 +810,7 @@ public class PlanPrinter
             addNode(node,
                     format("%sIndexJoin", node.getType().getJoinLabel()),
                     ImmutableMap.of(
-                            "criteria", Joiner.on(" AND ").join(anonymizeExpressions(joinExpressions)),
-                            "hash", formatHash(node.getProbeHashSymbol(), node.getIndexHashSymbol())),
+                            "criteria", Joiner.on(" AND ").join(anonymizeExpressions(joinExpressions))),
                     context);
             node.getProbeSource().accept(this, new Context(context.isInitialPlan()));
             node.getIndexSource().accept(this, new Context(context.isInitialPlan()));
@@ -801,8 +847,7 @@ public class PlanPrinter
             addNode(node,
                     format("DistinctLimit%s", node.isPartial() ? "Partial" : ""),
                     ImmutableMap.of(
-                            "limit", String.valueOf(node.getLimit()),
-                            "hash", formatHash(node.getHashSymbol())),
+                            "limit", String.valueOf(node.getLimit())),
                     context);
             return processChildren(node, new Context(context.isInitialPlan()));
         }
@@ -825,7 +870,7 @@ public class PlanPrinter
             NodeRepresentation nodeOutput = addNode(
                     node,
                     "Aggregate",
-                    ImmutableMap.of("type", type, "keys", keys, "hash", formatHash(node.getHashSymbol())),
+                    ImmutableMap.of("type", type, "keys", keys),
                     context);
 
             node.getAggregations().forEach((symbol, aggregation) ->
@@ -865,8 +910,7 @@ public class PlanPrinter
                     "MarkDistinct",
                     ImmutableMap.of(
                             "distinct", formatOutputs(node.getDistinctSymbols()),
-                            "marker", anonymizer.anonymize(node.getMarkerSymbol()),
-                            "hash", formatHash(node.getHashSymbol())),
+                            "marker", anonymizer.anonymize(node.getMarkerSymbol())),
                     context);
 
             return processChildren(node, new Context(context.isInitialPlan()));
@@ -906,7 +950,7 @@ public class PlanPrinter
             NodeRepresentation nodeOutput = addNode(
                     node,
                     "Window",
-                    descriptor.put("hash", formatHash(node.getHashSymbol())).buildOrThrow(),
+                    descriptor.buildOrThrow(),
                     context);
 
             for (Entry<Symbol, WindowNode.Function> entry : node.getWindowFunctions().entrySet()) {
@@ -959,7 +1003,7 @@ public class PlanPrinter
             NodeRepresentation nodeOutput = addNode(
                     node,
                     "PatternRecognition",
-                    descriptor.put("hash", formatHash(node.getHashSymbol())).buildOrThrow(),
+                    descriptor.buildOrThrow(),
                     context);
 
             if (node.getCommonBaseFrame().isPresent()) {
@@ -1096,7 +1140,6 @@ public class PlanPrinter
                     "TopNRanking",
                     descriptor
                             .put("limit", String.valueOf(node.getMaxRankingPerPartition()))
-                            .put("hash", formatHash(node.getHashSymbol()))
                             .buildOrThrow(),
                     context);
 
@@ -1120,7 +1163,7 @@ public class PlanPrinter
             NodeRepresentation nodeOutput = addNode(
                     node,
                     "RowNumber",
-                    descriptor.put("hash", formatHash(node.getHashSymbol())).buildOrThrow(),
+                    descriptor.buildOrThrow(),
                     context);
             nodeOutput.appendDetails("%s := %s", anonymizer.anonymize(node.getRowNumberSymbol()), "row_number()");
 
@@ -1133,7 +1176,12 @@ public class PlanPrinter
             TableHandle table = node.getTable();
             TableInfo tableInfo = tableInfoSupplier.apply(node);
             NodeRepresentation nodeOutput;
-            nodeOutput = addNode(node, "TableScan", ImmutableMap.of("table", anonymizer.anonymize(table, tableInfo)), context);
+            nodeOutput = addNode(
+                    node,
+                    "TableScan",
+                    ImmutableMap.of("table", anonymizer.anonymize(table, tableInfo)),
+                    splitSourceMetrics.getOrDefault(node.getId(), Metrics.EMPTY),
+                    context);
             printTableScanInfo(nodeOutput, node, tableInfo);
             PlanNodeStats nodeStats = stats.map(s -> s.get(node.getId())).orElse(null);
             if (nodeStats != null) {
@@ -1146,7 +1194,7 @@ public class PlanPrinter
                         formatPositions(nodeStats.getPlanNodeInputPositions()),
                         nodeStats.getPlanNodeInputDataSize().toString());
                 addPhysicalInputStats(nodeStats, inputDetailBuilder, argsBuilder);
-                addSplits(nodeStats, inputDetailBuilder, argsBuilder);
+                addSplits(node.getId(), nodeStats, inputDetailBuilder, argsBuilder);
                 appendDetailsFromBuilder(nodeOutput, inputDetailBuilder, argsBuilder);
             }
             return null;
@@ -1261,6 +1309,7 @@ public class PlanPrinter
                     ImmutableList.of(sourceNode),
                     ImmutableList.of(),
                     Optional.empty(),
+                    scanNode.isPresent() ? splitSourceMetrics.getOrDefault(scanNode.get().getId(), Metrics.EMPTY) : Metrics.EMPTY,
                     context);
 
             projectNode.ifPresent(value -> printAssignments(nodeOutput, value.getAssignments()));
@@ -1281,7 +1330,7 @@ public class PlanPrinter
                             nodeStats.getPlanNodeInputDataSize().toString(),
                             formatDouble(filtered));
                     addPhysicalInputStats(nodeStats, inputDetailBuilder, argsBuilder);
-                    addSplits(nodeStats, inputDetailBuilder, argsBuilder);
+                    addSplits(scanNode.get().getId(), nodeStats, inputDetailBuilder, argsBuilder);
                     appendDetailsFromBuilder(nodeOutput, inputDetailBuilder, argsBuilder);
                 }
                 List<DynamicFilterDomainStats> collectedDomainStats = dynamicFilters.stream()
@@ -1312,9 +1361,13 @@ public class PlanPrinter
             return null;
         }
 
-        private void addSplits(PlanNodeStats nodeStats, StringBuilder inputDetailBuilder, ImmutableList.Builder<String> argsBuilder)
+        private void addSplits(PlanNodeId scanNodeId, PlanNodeStats nodeStats, StringBuilder inputDetailBuilder, ImmutableList.Builder<String> argsBuilder)
         {
             buildFormatString(inputDetailBuilder, argsBuilder, ", Splits: %s", String.valueOf(nodeStats.getOperatorStats().values().iterator().next().getTotalDrivers()));
+            Long totalTime = getSplitsTotalTimeNanos.get(scanNodeId);
+            if (totalTime != null) {
+                inputDetailBuilder.append(format(", Splits generation wait time: %sms", formatDouble(totalTime / 1_000_000.0d)));
+            }
         }
 
         private static void addPhysicalInputStats(PlanNodeStats nodeStats, StringBuilder inputDetailBuilder, ImmutableList.Builder<String> argsBuilder)
@@ -1468,6 +1521,7 @@ public class PlanPrinter
                     ImmutableList.of(),
                     ImmutableList.of(),
                     Optional.empty(),
+                    Metrics.EMPTY,
                     context);
 
             return null;
@@ -1639,7 +1693,6 @@ public class PlanPrinter
                         ImmutableMap.of(
                                 "partitioning", anonymizer.anonymize(node.getPartitioningScheme().getPartitioning().getHandle()),
                                 "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().isReplicateNullsAndAny()),
-                                "hashColumn", formatHash(node.getPartitioningScheme().getHashColumn()),
                                 "arguments", formatCollection(node.getPartitioningScheme().getPartitioning().getArguments(), anonymizer::anonymize)),
                         context);
             }
@@ -1650,8 +1703,7 @@ public class PlanPrinter
                                 "partitionCount", node.getPartitioningScheme().getPartitionCount().map(String::valueOf).orElse(""),
                                 "scaleWriters", formatBoolean(node.getPartitioningScheme().getPartitioning().getHandle().isScaleWriters()),
                                 "type", node.getType().name(),
-                                "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().isReplicateNullsAndAny()),
-                                "hashColumn", formatHash(node.getPartitioningScheme().getHashColumn())),
+                                "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().isReplicateNullsAndAny())),
                         context);
             }
             return processChildren(node, new Context(context.isInitialPlan()));
@@ -1668,6 +1720,7 @@ public class PlanPrinter
                     ImmutableList.of(node.getCurrentPlan()),
                     ImmutableList.of(node.getInitialPlan()),
                     Optional.empty(),
+                    Metrics.EMPTY,
                     context);
             node.getInitialPlan().accept(this, new Context("Initial Plan", true));
             node.getCurrentPlan().accept(this, new Context("Current Plan", false));
@@ -1932,7 +1985,7 @@ public class PlanPrinter
                 specification.orderingScheme().ifPresent(orderingScheme -> descriptor.put("orderBy", formatOrderingScheme(orderingScheme, node.getPreSorted())));
             });
 
-            addNode(node, "TableFunctionProcessor", descriptor.put("hash", formatHash(node.getHashSymbol())).buildOrThrow(), context);
+            addNode(node, "TableFunctionProcessor", descriptor.buildOrThrow(), context);
 
             return processChildren(node, new Context(context.isInitialPlan()));
         }
@@ -2125,14 +2178,14 @@ public class PlanPrinter
             return addNode(node, name, descriptor, node.getSources(), Optional.empty(), context);
         }
 
-        public NodeRepresentation addNode(PlanNode node, String name, Map<String, String> descriptor, Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost, Context context)
+        public NodeRepresentation addNode(PlanNode node, String name, Map<String, String> descriptor, Metrics splitSourceMetrics, Context context)
         {
-            return addNode(node, name, descriptor, node.getSources(), reorderJoinStatsAndCost, context);
+            return addNode(node, name, descriptor, ImmutableList.of(node.getId()), node.getSources(), ImmutableList.of(), Optional.empty(), splitSourceMetrics, context);
         }
 
         public NodeRepresentation addNode(PlanNode node, String name, Map<String, String> descriptor, List<PlanNode> children, Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost, Context context)
         {
-            return addNode(node, name, descriptor, ImmutableList.of(node.getId()), children, ImmutableList.of(), reorderJoinStatsAndCost, context);
+            return addNode(node, name, descriptor, ImmutableList.of(node.getId()), children, ImmutableList.of(), reorderJoinStatsAndCost, Metrics.EMPTY, context);
         }
 
         public NodeRepresentation addNode(
@@ -2143,6 +2196,7 @@ public class PlanPrinter
                 List<PlanNode> children,
                 List<PlanNode> initialChildren,
                 Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost,
+                Metrics splitSourceMetrics,
                 Context context)
         {
             List<PlanNodeId> childrenIds = children.stream().map(PlanNode::getId).collect(toImmutableList());
@@ -2169,6 +2223,7 @@ public class PlanPrinter
                     estimatedStats,
                     estimatedCosts,
                     reorderJoinStatsAndCost,
+                    splitSourceMetrics,
                     childrenIds,
                     initialChildrenIds);
 

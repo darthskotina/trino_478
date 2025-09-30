@@ -5,17 +5,18 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>475</version>
+        <version>477</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-bigquery</artifactId>
     <packaging>trino-plugin</packaging>
+    <name>${project.artifactId}</name>
     <description>Trino - BigQuery connector</description>
 
     <properties>
         <air.compiler.fail-warnings>true</air.compiler.fail-warnings>
-        <air.test.jvm.additional-arguments>${air.test.jvm.additional-arguments.default} --add-opens=java.base/java.nio=ALL-UNNAMED</air.test.jvm.additional-arguments>
+        <air.test.jvm.additional-arguments>${air.test.jvm.additional-arguments.default} --add-opens=java.base/java.nio=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow</air.test.jvm.additional-arguments>
     </properties>
 
     <dependencyManagement>
@@ -186,6 +187,7 @@
         <dependency>
             <groupId>com.google.inject</groupId>
             <artifactId>guice</artifactId>
+            <classifier>classes</classifier>
         </dependency>
 
         <dependency>
@@ -319,12 +321,7 @@
         <dependency>
             <groupId>org.json</groupId>
             <artifactId>json</artifactId>
-            <version>20250107</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.threeten</groupId>
-            <artifactId>threetenbp</artifactId>
+            <version>20250517</version>
         </dependency>
 
         <dependency>

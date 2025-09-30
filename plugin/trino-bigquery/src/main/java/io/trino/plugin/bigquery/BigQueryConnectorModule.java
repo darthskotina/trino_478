@@ -25,12 +25,14 @@ import com.google.inject.Singleton;
 import com.google.inject.multibindings.Multibinder;
 import com.google.inject.multibindings.OptionalBinder;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.plugin.base.cache.identity.IdentityCacheMapping;
+import io.trino.plugin.base.cache.identity.SingletonIdentityCacheMapping;
 import io.trino.plugin.base.logging.FormatInterpolator;
 import io.trino.plugin.base.logging.SessionInterpolatedValues;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.bigquery.procedure.ExecuteProcedure;
 import io.trino.plugin.bigquery.ptf.Query;
-import io.trino.spi.NodeManager;
+import io.trino.spi.Node;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.procedure.Procedure;
@@ -45,6 +47,7 @@ import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.trino.plugin.base.ClosingBinder.closingBinder;
 import static io.trino.plugin.base.JdkCompatibilityChecks.verifyConnectorAccessOpened;
+import static io.trino.plugin.base.JdkCompatibilityChecks.verifyConnectorUnsafeAllowed;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
@@ -113,9 +116,9 @@ public class BigQueryConnectorModule
 
         @Provides
         @Singleton
-        public static HeaderProvider createHeaderProvider(NodeManager nodeManager)
+        public static HeaderProvider createHeaderProvider(Node currentNode)
         {
-            return FixedHeaderProvider.create("user-agent", "Trino/" + nodeManager.getCurrentNode().getVersion());
+            return FixedHeaderProvider.create("user-agent", "Trino/" + currentNode.getVersion());
         }
 
         @Provides
@@ -152,7 +155,7 @@ public class BigQueryConnectorModule
             // as credentials do not depend on actual connector session.
             newOptionalBinder(binder, IdentityCacheMapping.class)
                     .setDefault()
-                    .to(IdentityCacheMapping.SingletonIdentityCacheMapping.class)
+                    .to(SingletonIdentityCacheMapping.class)
                     .in(Scopes.SINGLETON);
 
             OptionalBinder<BigQueryCredentialsSupplier> credentialsSupplierBinder = newOptionalBinder(binder, BigQueryCredentialsSupplier.class);
@@ -182,6 +185,7 @@ public class BigQueryConnectorModule
                     binder,
                     "bigquery",
                     ImmutableMultimap.of("java.base", "java.nio"));
+            verifyConnectorUnsafeAllowed(binder, "bigquery");
 
             configBinder(binder).bindConfig(BigQueryArrowConfig.class);
             binder.bind(BigQueryArrowBufferAllocator.class).in(Scopes.SINGLETON);

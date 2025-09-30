@@ -21,7 +21,6 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.trino.Session;
-import io.trino.operator.OperatorStats;
 import io.trino.spi.QueryId;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
@@ -44,7 +43,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -104,6 +102,7 @@ public abstract class BaseBigQueryConnectorTest
             case SUPPORTS_ADD_COLUMN,
                     SUPPORTS_CREATE_MATERIALIZED_VIEW,
                     SUPPORTS_CREATE_VIEW,
+                    SUPPORTS_DEFAULT_COLUMN_VALUE,
                     SUPPORTS_MAP_TYPE,
                     SUPPORTS_MERGE,
                     SUPPORTS_NEGATIVE_DATE,
@@ -1234,7 +1233,7 @@ public abstract class BaseBigQueryConnectorTest
     @Test
     public void testLimitPushdownWithExternalTable()
     {
-        String externalTableName =  TEST_SCHEMA + ".region_external_table_" + randomNameSuffix();
+        String externalTableName = TEST_SCHEMA + ".region_external_table_" + randomNameSuffix();
         onBigQuery("CREATE EXTERNAL TABLE " + externalTableName + " OPTIONS (format = 'CSV', uris = ['gs://" + gcpStorageBucket + "/tpch/tiny/region.csv'])");
         try {
             assertLimitPushdownOnRegionTable(getSession(), externalTableName);
@@ -1263,7 +1262,7 @@ public abstract class BaseBigQueryConnectorTest
     @Test
     public void testLimitPushdownWithMaterializedView()
     {
-        String mvName =  TEST_SCHEMA + ".region_mv_" + randomNameSuffix();
+        String mvName = TEST_SCHEMA + ".region_mv_" + randomNameSuffix();
         onBigQuery("CREATE MATERIALIZED VIEW " + mvName + " AS SELECT * FROM tpch.region");
         try {
             // materialized view with materialization uses storage api, with storage api limit pushdown is not supported
@@ -1456,42 +1455,6 @@ public abstract class BaseBigQueryConnectorTest
     }
 
     @Test
-    void testMaxParallelism()
-    {
-        Session singleParallelism = Session.builder(getSession())
-                .setCatalogSessionProperty("bigquery", "max_parallelism", "1")
-                .build();
-
-        try (TestTable table = new TestTable(bigQuerySqlExecutor, "tpch.test_max_parallelism", "AS SELECT repeat('x', 1000) x FROM UNNEST(GENERATE_ARRAY(1, 1000000))")) {
-            assertThat(getSplitCount(getSession(), "SELECT * FROM " + table.getName())).isGreaterThan(1);
-            assertThat(getSplitCount(singleParallelism, "SELECT * FROM " + table.getName())).isEqualTo(1);
-        }
-    }
-
-    private long getSplitCount(Session session, @Language("SQL") String query)
-    {
-        MaterializedResultWithPlan result = getQueryRunner().executeWithPlan(session, query);
-        return getOperatorStats(result.queryId()).getTotalDrivers();
-    }
-
-    private OperatorStats getOperatorStats(QueryId queryId)
-    {
-        try {
-            return getDistributedQueryRunner().getCoordinator()
-                    .getQueryManager()
-                    .getFullQueryInfo(queryId)
-                    .getQueryStats()
-                    .getOperatorSummaries()
-                    .stream()
-                    .filter(summary -> summary.getOperatorType().startsWith("TableScan") || summary.getOperatorType().startsWith("Scan"))
-                    .collect(onlyElement());
-        }
-        catch (NoSuchElementException e) {
-            throw new RuntimeException("Couldn't find operator summary, probably due to query statistic collection error", e);
-        }
-    }
-
-    @Test
     @Override
     public void testInsertArray()
     {
@@ -1568,5 +1531,4 @@ public abstract class BaseBigQueryConnectorTest
     {
         bigQuerySqlExecutor.execute(sql);
     }
-
 }

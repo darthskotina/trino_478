@@ -17,12 +17,12 @@ import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
 import io.trino.Session;
+import io.trino.connector.CatalogHandle;
 import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.BeginTableExecuteResult;
-import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnHandle;
@@ -66,10 +66,13 @@ import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.LanguageFunction;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.FunctionAuthorization;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.RoleGrant;
+import io.trino.spi.security.SchemaAuthorization;
+import io.trino.spi.security.TableAuthorization;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.TableStatistics;
@@ -464,7 +467,7 @@ public interface Metadata
     Optional<CatalogHandle> getCatalogHandle(Session session, String catalogName);
 
     /**
-     * Gets all the loaded catalogs
+     * Lists all defined catalogs (both loaded properly and failed ones).
      */
     List<CatalogInfo> listCatalogs(Session session);
 
@@ -509,6 +512,11 @@ public interface Metadata
      * Rename the specified view.
      */
     void renameView(Session session, QualifiedObjectName existingViewName, QualifiedObjectName newViewName);
+
+    /**
+     * Refreshes the view definition.
+     */
+    void refreshView(Session session, QualifiedObjectName viewName, ViewDefinition definition);
 
     /**
      * Drops the specified view.
@@ -672,6 +680,21 @@ public interface Metadata
     List<GrantInfo> listTablePrivileges(Session session, QualifiedTablePrefix prefix);
 
     /**
+     * Grants the specified privilege to the specified user on the specified branch
+     */
+    void grantTableBranchPrivileges(Session session, QualifiedObjectName tableName, String branchName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
+
+    /**
+     * Denies the specified privilege to the specified principal on the specified branch
+     */
+    void denyTableBranchPrivileges(Session session, QualifiedObjectName tableName, String branchName, Set<Privilege> privileges, TrinoPrincipal grantee);
+
+    /**
+     * Revokes the specified privilege on the specified branch from the specified user.
+     */
+    void revokeTableBranchPrivileges(Session session, QualifiedObjectName tableName, String branchName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
+
+    /**
      * Gets all the EntityPrivileges associated with an entityKind.  Defines ALL PRIVILEGES
      * for the entityKind
      */
@@ -742,6 +765,16 @@ public interface Metadata
     void createLanguageFunction(Session session, QualifiedObjectName name, LanguageFunction function, boolean replace);
 
     void dropLanguageFunction(Session session, QualifiedObjectName name, String signatureToken);
+
+    void createBranch(Session session, TableHandle tableHandle, String branch, Optional<String> fromBranch, SaveMode saveMode, Map<String, Object> properties);
+
+    void dropBranch(Session session, TableHandle tableHandle, String branch);
+
+    void fastForwardBranch(Session session, TableHandle tableHandle, String sourceBranch, String targetBranch);
+
+    Collection<String> listBranches(Session session, QualifiedObjectName tableName);
+
+    boolean branchExists(Session session, QualifiedObjectName tableName, String branch);
 
     /**
      * Creates the specified materialized view with the specified view definition.
@@ -853,4 +886,19 @@ public interface Metadata
     WriterScalingOptions getInsertWriterScalingOptions(Session session, TableHandle tableHandle);
 
     void setEntityAuthorization(Session session, EntityKindAndName entityKindAndName, TrinoPrincipal principal);
+
+    /**
+     * Returns list of schemas authorization info
+     */
+    Set<SchemaAuthorization> getSchemasAuthorizationInfo(Session session, QualifiedSchemaPrefix prefix);
+
+    /**
+     * Returns list of tables authorization info
+     */
+    Set<TableAuthorization> getTablesAuthorizationInfo(Session session, QualifiedTablePrefix prefix);
+
+    /**
+     * Returns list of functions authorization info
+     */
+    Set<FunctionAuthorization> getFunctionsAuthorizationInfo(Session session, QualifiedObjectPrefix prefix);
 }

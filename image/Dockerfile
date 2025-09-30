@@ -1,8 +1,8 @@
 # Build argument for Trino version
-ARG TRINO_VERSION=475
+ARG TRINO_VERSION=477
 
 # Stage 1: Build Trino from source
-FROM eclipse-temurin:23-jdk AS builder
+FROM eclipse-temurin:24-jdk AS builder
 
 # Redeclare ARG to make it available in this stage
 ARG TRINO_VERSION

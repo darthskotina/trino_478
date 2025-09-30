@@ -25,15 +25,21 @@ support:
   - Activate the native implementation for S3 storage support. Defaults to
     `false`. Set to `true` to use S3 and enable all other properties.
 * - `s3.endpoint`
-  - Required endpoint URL for S3.
+  - S3 service endpoint URL to communicate with.
 * - `s3.region`
-  - Required region name for S3.
+  - S3 region to communicate with.
+* - `s3.cross-region-access`
+  - Enable cross region access. Defaults to `false`.
 * - `s3.path-style-access`
   - Use path-style access for all requests to S3
 * - `s3.storage-class`
   - S3 storage class to use while writing data. Defaults to `STANDARD`. Other allowed
     values are: `STANDARD_IA`, `INTELLIGENT_TIERING`, `REDUCED_REDUNDANCY`, `ONEZONE_IA`,
     `GLACIER`, `DEEP_ARCHIVE`, `OUTPOSTS`, `GLACIER_IR`, `SNOW`, `EXPRESS_ONEZONE`.
+* - `s3.signer-type`
+  - AWS signing protocol to use for authenticating S3 requests. Supported values are: 
+    `AwsS3V4Signer`, `Aws4Signer`, `AsyncAws4Signer`, `Aws4UnsignedPayloadSigner`, 
+    `EventStreamAws4Signer`.
 * - `s3.exclusive-create`
   - Whether conditional write is supported by the S3-compatible storage. Defaults to `true`.
 * - `s3.canned-acl`
@@ -58,7 +64,7 @@ support:
     `CUSTOMER`. 
 * - `s3.streaming.part-size`
   - Part size for S3 streaming upload. Values between `5MB` and `256MB` are
-    valid. Defaults to `16MB`.
+    valid. Defaults to `32MB`.
 * - `s3.requester-pays`
   - Switch to activate billing transfer cost to the requester. Defaults to
     `false`.
@@ -73,8 +79,8 @@ support:
 * - `s3.socket-connect-timeout`
   - Maximum time [duration](prop-type-duration) allowed for socket connection
     requests to complete before timing out.
-* - `s3.socket-read-timeout`
-  - Maximum time [duration](prop-type-duration) for socket read operations
+* - `s3.socket-timeout`
+  - Maximum time [duration](prop-type-duration) for socket read/write operations
     before timing out.
 * - `s3.tcp-keep-alive`
   - Enable TCP keep alive on created connections. Defaults to `false`.
@@ -99,7 +105,7 @@ support:
     throttling.
 * - `s3.max-error-retries`
   - Specifies maximum number of retries the client will make on errors.
-    Defaults to `10`.
+    Defaults to `20`.
 * - `s3.use-web-identity-token-credentials-provider`
   - Set to `true` to only use the web identity token credentials provider,
     instead of the default providers chain. This can be useful when running
@@ -177,10 +183,10 @@ The security mapping must provide one or more configuration settings:
   of those roles.
 - `kmsKeyId`: ID of KMS-managed key to be used for client-side encryption.
 - `allowedKmsKeyIds`: KMS-managed key IDs that are allowed to be specified as an extra
-  credential. If list cotains `*`, then any key can be specified via extra credential.
+  credential. If list contains `*`, then any key can be specified via extra credential.
 - `sseCustomerKey`: The customer provided key (SSE-C) for server-side encryption.
 - `allowedSseCustomerKey`: The SSE-C keys that are allowed to be specified as an extra
-  credential. If list cotains `*`, then any key can be specified via extra credential.
+  credential. If list contains `*`, then any key can be specified via extra credential.
 - `endpoint`: The S3 storage endpoint server. This optional property can be used
   to override S3 endpoints on a per-bucket basis.
 - `region`: The S3 region to connect to. This optional property can be used
@@ -377,7 +383,7 @@ the following edits to your catalog configuration:
      - Also see `s3.connection-max-idle-time` in preceding section for more
        connection keep-alive options.
    * - `hive.s3.socket-timeout`
-     - `s3.socket-read-timeout`
+     - `s3.socket-timeout`
      - Also see `s3.tcp-keep-alive` in preceding sections for more socket
        connection keep-alive options.
    * - `hive.s3.max-connections`
@@ -386,13 +392,15 @@ the following edits to your catalog configuration:
    * - `hive.s3.path-style-access`
      - `s3.path-style-access`
      -
+   * - `hive.s3.signer-type`
+     - `s3.signer-type`
+     -
   :::
 
 1. Remove the following legacy configuration properties if they exist in your
    catalog configuration:
 
       * `hive.s3.storage-class`
-      * `hive.s3.signer-type`
       * `hive.s3.signer-class`
       * `hive.s3.staging-directory`
       * `hive.s3.pin-client-to-current-region`

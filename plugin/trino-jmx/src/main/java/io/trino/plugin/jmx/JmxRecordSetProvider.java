@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.slice.Slice;
-import io.trino.spi.NodeManager;
+import io.trino.spi.Node;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
 import io.trino.spi.connector.ConnectorSession;
@@ -37,6 +37,7 @@ import javax.management.ObjectName;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -55,17 +56,17 @@ public class JmxRecordSetProvider
     private final JmxHistoricalData jmxHistoricalData;
 
     @Inject
-    public JmxRecordSetProvider(MBeanServer mbeanServer, NodeManager nodeManager, JmxHistoricalData jmxHistoricalData)
+    public JmxRecordSetProvider(MBeanServer mbeanServer, Node currentNode, JmxHistoricalData jmxHistoricalData)
     {
         this.mbeanServer = requireNonNull(mbeanServer, "mbeanServer is null");
-        this.nodeId = nodeManager.getCurrentNode().getNodeIdentifier();
+        this.nodeId = currentNode.getNodeIdentifier();
         this.jmxHistoricalData = requireNonNull(jmxHistoricalData, "jmxHistoricalData is null");
     }
 
     public List<Object> getLiveRow(String objectName, List<? extends ColumnHandle> columns, long entryTimestamp)
             throws JMException
     {
-        ImmutableMap<String, Optional<Object>> attributes = getAttributes(getColumnNames(columns), objectName);
+        Map<String, Optional<Object>> attributes = getAttributes(getColumnNames(columns), objectName);
         List<Object> row = new ArrayList<>();
 
         for (ColumnHandle column : columns) {
@@ -210,7 +211,7 @@ public class JmxRecordSetProvider
                 .collect(Collectors.toList());
     }
 
-    private ImmutableMap<String, Optional<Object>> getAttributes(Set<String> uniqueColumnNames, String name)
+    private Map<String, Optional<Object>> getAttributes(Set<String> uniqueColumnNames, String name)
             throws JMException
     {
         ObjectName objectName = new ObjectName(name);

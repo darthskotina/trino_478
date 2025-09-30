@@ -83,7 +83,7 @@ are also available. They are discussed later in this topic.
 * - `hive.user-metastore-cache-ttl`
   - [Duration](prop-type-duration) of how long cached metastore statistics, which are user specific
     in user impersonation scenarios, are considered valid.
-  - `10s`
+  - `0s`
 * - `hive.user-metastore-cache-maximum-size`
   - Maximum number of metastore data objects in the Hive metastore cache,
     which are user specific in user impersonation scenarios.
@@ -300,7 +300,7 @@ properties:
     metadata is removed, and the data continues to consume disk space. This
     occurs because the Hive metastore is responsible for deleting the internal
     table data. When the metastore is configured to use Kerberos authentication,
-    all of the HDFS operations performed by the metastore are impersonated.
+    all the HDFS operations performed by the metastore are impersonated.
     Errors deleting data are silently ignored.
   -
 * - `hive.metastore.client.keytab`
@@ -487,8 +487,8 @@ following properties:
   - Warehouse identifier/location for the catalog (optional). Example:
     `s3://my_bucket/warehouse_location`
 * - `iceberg.rest-catalog.security`
-  - The type of security to use (default: `NONE`).  `OAUTH2` requires either a
-    `token` or `credential`. Example: `OAUTH2`
+  - The type of security to use (default: `NONE`). Possible values are `NONE`, 
+    `SIGV4` or `OAUTH2`. `OAUTH2` requires either a `token` or `credential`.
 * - `iceberg.rest-catalog.session`
   - Session information included when communicating with the REST Catalog.
     Options are `NONE` or `USER` (default: `NONE`).
@@ -515,6 +515,10 @@ following properties:
 * - `iceberg.rest-catalog.nested-namespace-enabled`
   - Support querying objects under nested namespace.
     Defaults to `false`.
+* - `iceberg.rest-catalog.view-endpoints-enabled`
+  - Enable view endpoints. Defaults to `true`.
+* - `iceberg.rest-catalog.signing-name`
+  - AWS SigV4 signing service name. Defaults to `execute-api`.
 * - `iceberg.rest-catalog.case-insensitive-name-matching`
   - Match namespace, table, and view names case insensitively. Defaults to `false`.
 * - `iceberg.rest-catalog.case-insensitive-name-matching.cache-ttl`
@@ -569,7 +573,7 @@ directory.
 * - `iceberg.jdbc-catalog.connection-url`
   - The URI to connect to the JDBC server.
 * - `iceberg.jdbc-catalog.connection-user`
-  - User name for JDBC client.
+  - Username for JDBC client.
 * - `iceberg.jdbc-catalog.connection-password`
   - Password for JDBC client.
 * - `iceberg.jdbc-catalog.catalog-name`

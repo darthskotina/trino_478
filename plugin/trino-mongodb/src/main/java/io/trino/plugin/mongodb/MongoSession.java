@@ -25,6 +25,7 @@ import com.google.common.primitives.Shorts;
 import com.google.common.primitives.SignedBytes;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.mongodb.DBRef;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoNamespace;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
@@ -91,6 +92,7 @@ import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.plugin.mongodb.MongoErrorCode.MONGODB_CLUSTER_ERROR;
 import static io.trino.plugin.mongodb.ObjectIdType.OBJECT_ID;
 import static io.trino.plugin.mongodb.ptf.Query.parseFilter;
 import static io.trino.spi.HostAddress.fromParts;
@@ -259,7 +261,13 @@ public class MongoSession
             return tableCache.get(tableName, () -> loadTableSchema(tableName));
         }
         catch (ExecutionException | UncheckedExecutionException e) {
-            throwIfInstanceOf(e.getCause(), TrinoException.class);
+            Throwable cause = e.getCause();
+            if (cause != null) {
+                throwIfInstanceOf(cause, TrinoException.class);
+                if (cause instanceof MongoCommandException) {
+                    throw new TrinoException(MONGODB_CLUSTER_ERROR, cause);
+                }
+            }
             throw new RuntimeException(e);
         }
     }
@@ -516,7 +524,7 @@ public class MongoSession
         Set<MongoColumnHandle> projectedColumns = tableHandle.projectedColumns();
         checkArgument(projectedColumns.isEmpty() || projectedColumns.containsAll(columns), "projectedColumns must be empty or equal to columns");
 
-        Document projection = buildProjection(columns);
+        Document projection = buildProjection(columns, implicitPrefix);
 
         MongoCollection<Document> collection = getCollection(tableHandle.remoteTableName());
         Document filter = buildFilter(tableHandle);
@@ -532,7 +540,7 @@ public class MongoSession
     }
 
     @VisibleForTesting
-    static Document buildProjection(List<MongoColumnHandle> columns)
+    static Document buildProjection(List<MongoColumnHandle> columns, String implicitPrefix)
     {
         Document output = new Document();
 
@@ -544,7 +552,13 @@ public class MongoSession
         // Starting in MongoDB 4.4, it is illegal to project an embedded document with any of the embedded document's fields
         // (https://www.mongodb.com/docs/manual/reference/limits/#mongodb-limit-Projection-Restrictions). So, Project only sufficient columns.
         for (MongoColumnHandle column : projectSufficientColumns(columns)) {
-            output.append(column.getQualifiedName(), 1);
+            if (column.dereferenceNames().stream().anyMatch(columnName -> TypeUtils.isImplicitRowField(columnName, implicitPrefix))) {
+                // Add parent field for implicit column
+                output.append(column.baseName(), 1);
+            }
+            else {
+                output.append(column.getQualifiedName(), 1);
+            }
         }
 
         return output;

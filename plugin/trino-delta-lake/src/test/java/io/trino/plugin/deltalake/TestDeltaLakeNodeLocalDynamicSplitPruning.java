@@ -149,7 +149,8 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                             Optional.empty(),
                             Optional.empty(),
                             0,
-                            false),
+                            false,
+                            Optional.empty()),
                     transaction);
 
             TupleDomain<ColumnHandle> splitPruningPredicate = TupleDomain.withColumnDomains(
@@ -249,7 +250,8 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                             Optional.empty(),
                             Optional.empty(),
                             0,
-                            false),
+                            false,
+                            Optional.empty()),
                     transaction);
 
             // Simulate situations where the dynamic filter (e.g.: while performing a JOIN with another table) reduces considerably
@@ -296,7 +298,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
                     assertThat(page.getPositionCount()).isEqualTo(1);
                     assertThat(INTEGER.getInt(page.getBlock(0), 0)).isEqualTo(dateColumnValue);
                     assertThat(VARCHAR.getSlice(page.getBlock(1), 0).toStringUtf8()).isEqualTo(receiptColumnValue);
-                    assertThat(((SqlDecimal) amountColumnType.getObjectValue(null, page.getBlock(2), 0)).toBigDecimal()).isEqualTo(amountColumnValue);
+                    assertThat(((SqlDecimal) amountColumnType.getObjectValue(page.getBlock(2), 0)).toBigDecimal()).isEqualTo(amountColumnValue);
                 }
             }
         }
@@ -326,7 +328,7 @@ public class TestDeltaLakeNodeLocalDynamicSplitPruning
     {
         FileFormatDataSourceStats stats = new FileFormatDataSourceStats();
         DeltaLakePageSourceProvider provider = new DeltaLakePageSourceProvider(
-                new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS),
+                new DefaultDeltaLakeFileSystemFactory(new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS)),
                 stats,
                 PARQUET_READER_CONFIG,
                 deltaLakeConfig,
