@@ -2,7 +2,7 @@ variables:
   ARTIFACTORY_URL: artifactory.exness.io
   MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
   MAVEN_OPTS: "-Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
-  TRINO_VERSION: "475"  # Base Trino version
+  TRINO_VERSION: "477"  # Base Trino version
 
 stages:
   - build
@@ -47,7 +47,7 @@ stages:
 
 build-trino:
   stage: build
-  image: maven:3.9-eclipse-temurin-23
+  image: maven:3.9-eclipse-temurin-24
   before_script:
     - |
       if [ "$CI_COMMIT_BRANCH" = "main" ] || [ "$CI_COMMIT_BRANCH" = "master" ] || [ -n "$CI_COMMIT_TAG" ]; then
