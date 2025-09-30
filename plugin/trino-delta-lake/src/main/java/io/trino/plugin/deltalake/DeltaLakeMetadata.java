@@ -2600,14 +2600,16 @@ public class DeltaLakeMetadata
         String sourceTableName;
         try {
             // The clone commit is the first commit of the cloned table, so set the endVersion to 0
+            TransactionLogReader transactionLogReader = transactionLogReaderFactory.createReader(handle);
             TransactionLogTail transactionLogTail = null;
 
             try {
-                transactionLogTail = loadNewTail(fileSystem, handle.getLocation(), Optional.empty(), Optional.of(0L), DataSize.ofBytes(0));
+                transactionLogTail = transactionLogReader.loadNewTail(session, Optional.empty(), Optional.of(0L), DataSize.ofBytes(0));
             }
             catch (Exception e) {
                 return Optional.empty();
             }
+
             List<Transaction> transactions = transactionLogTail.getTransactions();
             if (transactions.isEmpty()) {
                 return Optional.empty();
