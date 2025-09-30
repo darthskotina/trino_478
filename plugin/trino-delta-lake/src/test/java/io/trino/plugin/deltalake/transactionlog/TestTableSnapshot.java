@@ -23,9 +23,13 @@ import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
 import io.trino.filesystem.tracing.TracingFileSystemFactory;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
+import io.trino.plugin.deltalake.DefaultDeltaLakeFileSystemFactory;
 import io.trino.plugin.deltalake.DeltaLakeConfig;
+import io.trino.plugin.deltalake.metastore.VendedCredentialsHandle;
 import io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointSchemaManager;
 import io.trino.plugin.deltalake.transactionlog.checkpoint.LastCheckpoint;
+import io.trino.plugin.deltalake.transactionlog.reader.FileSystemTransactionLogReader;
+import io.trino.plugin.deltalake.transactionlog.reader.FileSystemTransactionLogReaderFactory;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
@@ -65,14 +69,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTableSnapshot
 {
-    private final ParquetReaderOptions parquetReaderOptions = new ParquetReaderConfig().toParquetReaderOptions();
+    private final ParquetReaderOptions parquetReaderOptions = ParquetReaderOptions.defaultOptions();
     private final int domainCompactionThreshold = 32;
 
     private CheckpointSchemaManager checkpointSchemaManager;
-    private TracingFileSystemFactory tracingFileSystemFactory;
+    private DefaultDeltaLakeFileSystemFactory tracingFileSystemFactory;
     private TestingTelemetry testingTelemetry = TestingTelemetry.create("test-table-snapshot");
     private TrinoFileSystem trackingFileSystem;
     private String tableLocation;
+    private VendedCredentialsHandle credentialsHandle;
 
     @BeforeEach
     public void setUp()
@@ -81,8 +86,9 @@ public class TestTableSnapshot
         checkpointSchemaManager = new CheckpointSchemaManager(TESTING_TYPE_MANAGER);
         tableLocation = getClass().getClassLoader().getResource("databricks73/person").toURI().toString();
 
-        tracingFileSystemFactory = new TracingFileSystemFactory(testingTelemetry.getTracer(), new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS));
-        trackingFileSystem = tracingFileSystemFactory.create(SESSION);
+        tracingFileSystemFactory = new DefaultDeltaLakeFileSystemFactory(new TracingFileSystemFactory(testingTelemetry.getTracer(), new HdfsFileSystemFactory(HDFS_ENVIRONMENT, HDFS_FILE_SYSTEM_STATS)));
+        credentialsHandle = VendedCredentialsHandle.empty(tableLocation);
+        trackingFileSystem = tracingFileSystemFactory.create(SESSION, credentialsHandle);
     }
 
     @Test
@@ -94,9 +100,10 @@ public class TestTableSnapshot
                 () -> {
                     Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(trackingFileSystem, tableLocation);
                     tableSnapshot.set(load(
+                            SESSION,
+                            new FileSystemTransactionLogReader(tableLocation, credentialsHandle, tracingFileSystemFactory),
                             new SchemaTableName("schema", "person"),
                             lastCheckpoint,
-                            trackingFileSystem,
                             tableLocation,
                             parquetReaderOptions,
                             true,
@@ -130,9 +137,10 @@ public class TestTableSnapshot
         ExecutorService executorService = newDirectExecutorService();
         Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(trackingFileSystem, tableLocation);
         TableSnapshot tableSnapshot = load(
+                SESSION,
+                new FileSystemTransactionLogReader(tableLocation, credentialsHandle, tracingFileSystemFactory),
                 new SchemaTableName("schema", "person"),
                 lastCheckpoint,
-                trackingFileSystem,
                 tableLocation,
                 parquetReaderOptions,
                 true,
@@ -148,9 +156,11 @@ public class TestTableSnapshot
                 new FileFormatDataSourceStats(),
                 tracingFileSystemFactory,
                 new ParquetReaderConfig(),
-                executorService);
-        MetadataEntry metadataEntry = transactionLogAccess.getMetadataEntry(SESSION, tableSnapshot);
-        ProtocolEntry protocolEntry = transactionLogAccess.getProtocolEntry(SESSION, tableSnapshot);
+                executorService,
+                new FileSystemTransactionLogReaderFactory(tracingFileSystemFactory));
+        TrinoFileSystem fileSystem = tracingFileSystemFactory.create(SESSION, tableLocation);
+        MetadataEntry metadataEntry = transactionLogAccess.getMetadataEntry(SESSION, fileSystem, tableSnapshot);
+        ProtocolEntry protocolEntry = transactionLogAccess.getProtocolEntry(SESSION, fileSystem, tableSnapshot);
         tableSnapshot.setCachedMetadata(Optional.of(metadataEntry));
         try (Stream<DeltaLakeTransactionLogEntry> stream = tableSnapshot.getCheckpointTransactionLogEntries(
                 SESSION,
@@ -262,9 +272,10 @@ public class TestTableSnapshot
     {
         Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(trackingFileSystem, tableLocation);
         TableSnapshot tableSnapshot = load(
+                SESSION,
+                new FileSystemTransactionLogReader(tableLocation, credentialsHandle, tracingFileSystemFactory),
                 new SchemaTableName("schema", "person"),
                 lastCheckpoint,
-                trackingFileSystem,
                 tableLocation,
                 parquetReaderOptions,
                 true,

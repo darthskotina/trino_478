@@ -114,7 +114,8 @@ implementation is used:
     in Iceberg version 0.11.0.
   - `true`
 * - `iceberg.max-partitions-per-writer`
-  - Maximum number of partitions handled per writer.
+  - Maximum number of partitions handled per writer. The equivalent catalog session property is
+    `max_partitions_per_writer`.
   - `100`
 * - `iceberg.target-max-file-size`
   - Target maximum size of written files; the actual size may be larger.
@@ -227,6 +228,9 @@ implementation is used:
   - Number of threads used for retrieving metadata. Currently, only table loading 
     is parallelized.
   - `8`
+* - `iceberg.file-delete-threads`
+  - Number of threads to use for deleting files when running `expire_snapshots` procedure.
+  - Double the number of processors on the coordinator node.
 * - `iceberg.bucket-execution`
   - Enable bucket-aware execution. This allows the engine to use physical
     bucketing information to optimize queries by reducing data exchanges.
@@ -743,7 +747,7 @@ WHERE system.bucket(custkey, 16) = 2;
 ### Data management
 
 The {ref}`sql-data-management` functionality includes support for `INSERT`,
-`UPDATE`, `DELETE`, and `MERGE` statements.
+`UPDATE`, `DELETE`, `TRUNCATE`, and `MERGE` statements.
 
 (iceberg-delete)=
 #### Deletion by partition
@@ -783,7 +787,7 @@ The {ref}`sql-schema-table-management` functionality includes support for:
 
 #### Schema evolution
 
-Iceberg supports schema evolution, with safe column add, drop, reorder, and
+Iceberg supports schema evolution, with safe column add, drop, and
 rename operations, including in nested structures.
 
 Iceberg supports updating column types only for widening operations:
@@ -801,7 +805,47 @@ created before the partitioning change.
 The connector supports the following commands for use with {ref}`ALTER TABLE
 EXECUTE <alter-table-execute>`.
 
-```{include} optimize.fragment
+##### optimize
+
+The `optimize` command is used for rewriting the content of the specified
+table so that it is merged into fewer but larger files. If the table is
+partitioned, the data compaction acts separately on each partition selected for
+optimization. This operation improves read performance.
+
+All files with a size below the optional `file_size_threshold` parameter
+(default value for the threshold is `100MB`) are merged in case any of the
+following conditions are met per partition:
+
+-  more than one data file to merge is present
+-  at least one data file, with delete files attached, is present
+
+```sql
+ALTER TABLE test_table EXECUTE optimize
+```
+
+The following statement merges files in a table that are
+under 128 megabytes in size:
+
+```sql
+ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')
+```
+
+You can use a `WHERE` clause with the columns used to partition the table
+to filter which partitions are optimized:
+
+```sql
+ALTER TABLE test_partitioned_table EXECUTE optimize
+WHERE partition_key = 1
+```
+
+You can use a more complex `WHERE` clause to narrow down the scope of the
+`optimize` procedure. The following example casts the timestamp values to
+dates, and uses a comparison to only optimize partitions with data from the year
+2022 or newer:
+
+```
+ALTER TABLE test_table EXECUTE optimize
+WHERE CAST(timestamp_tz AS DATE) > DATE '2021-12-31'
 ```
 
 Use a `WHERE` clause with [metadata columns](iceberg-metadata-columns) to filter
@@ -929,8 +973,13 @@ connector using a {doc}`WITH </sql/create-table-as>` clause.
   - Description
 * - `format`
   - Optionally specifies the format of table data files; either `PARQUET`,
-    `ORC`, or `AVRO`. Defaults to the value of the `iceberg.file-format` catalog
-    configuration property, which defaults to `PARQUET`.
+    `ORC`, or `AVRO`. Defaults to the value of the `iceberg.file-format` 
+    catalog configuration property, which defaults to `PARQUET`.
+* - `compression_codec`
+  - Optionally specifies the compression-codec used for writing the table; 
+    either `NONE`, `ZSTD`, `SNAPPY`, `LZ4`, or `GZIP`. Defaults to the value 
+    of the `iceberg.compression-codec` catalog configuration property, which 
+    defaults to `ZSTD`.
 * - `partitioning`
   - Optionally specifies table partitioning. If a table is partitioned by
     columns `c1` and `c2`, the partitioning property is `partitioning =
@@ -968,7 +1017,7 @@ connector using a {doc}`WITH </sql/create-table-as>` clause.
 * - `data_location`
   - Optionally specifies the file system location URI for the table's data files
 * - `extra_properties`
-  - Additional properties added to a Iceberg table. The properties are not used by Trino,
+  - Additional properties added to an Iceberg table. The properties are not used by Trino,
     and are available in the `$properties` metadata table.
     The properties are not included in the output of `SHOW CREATE TABLE` statements.
 :::
@@ -988,9 +1037,9 @@ WITH (
     location = '/var/example_tables/test_table');
 ```
 
-The table definition below specifies to use ORC files, bloom filter index by columns
-`c1` and `c2`, fpp is 0.05, and a file system location of
-`/var/example_tables/test_table`:
+The table definition below specifies to use ORC files with compression_codec
+SNAPPY, bloom filter index by columns `c1` and `c2`, fpp is 0.05, and a file
+system location of `/var/example_tables/test_table`:
 
 ```sql
 CREATE TABLE test_table (
@@ -999,6 +1048,7 @@ CREATE TABLE test_table (
     c3 DOUBLE)
 WITH (
     format = 'ORC',
+    compression_codec = 'SNAPPY',
     location = '/var/example_tables/test_table',
     orc_bloom_filter_columns = ARRAY['c1', 'c2'],
     orc_bloom_filter_fpp = 0.05);
@@ -1377,8 +1427,8 @@ The output of the query has the following columns:
     values in the file.
 * - `nan_value_counts`
   - `map(INTEGER, BIGINT)`
-  - Mapping between the Iceberg column ID and its corresponding count of non-
-    numerical values in the file.
+  - Mapping between the Iceberg column ID and its corresponding count of 
+    non-numerical values in the file.
 * - `lower_bounds`
   - `map(INTEGER, BIGINT)`
   - Mapping between the Iceberg column ID and its corresponding lower bound in

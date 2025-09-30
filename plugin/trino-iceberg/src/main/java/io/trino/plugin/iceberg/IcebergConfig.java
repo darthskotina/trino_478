@@ -43,7 +43,6 @@ import static io.trino.plugin.iceberg.IcebergFileFormat.PARQUET;
 import static java.util.Locale.ENGLISH;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.iceberg.TableProperties.COMMIT_NUM_RETRIES_DEFAULT;
 
 @DefunctConfig({
         "iceberg.allow-legacy-snapshot-syntax",
@@ -61,7 +60,7 @@ public class IcebergConfig
 
     private IcebergFileFormat fileFormat = PARQUET;
     private HiveCompressionOption compressionCodec = HiveCompressionOption.ZSTD;
-    private int maxCommitRetry = COMMIT_NUM_RETRIES_DEFAULT;
+    private Optional<Integer> maxCommitRetry = Optional.empty();
     private boolean useFileSizeFromMetadata = true;
     private int maxPartitionsPerWriter = 100;
     private boolean uniqueTableLocation = true;
@@ -89,7 +88,9 @@ public class IcebergConfig
     private boolean sortedWritingEnabled = true;
     private boolean queryPartitionFilterRequired;
     private Set<String> queryPartitionFilterRequiredSchemas = ImmutableSet.of();
-    private int splitManagerThreads = Runtime.getRuntime().availableProcessors() * 2;
+    private int splitManagerThreads = Math.min(Runtime.getRuntime().availableProcessors() * 2, 32);
+    private int planningThreads = Math.min(Runtime.getRuntime().availableProcessors(), 16);
+    private int fileDeleteThreads = Runtime.getRuntime().availableProcessors() * 2;
     private List<String> allowedExtraProperties = ImmutableList.of();
     private boolean incrementalRefreshEnabled = true;
     private boolean metadataCacheEnabled = true;
@@ -136,17 +137,16 @@ public class IcebergConfig
         return this;
     }
 
-    @Min(0)
-    public int getMaxCommitRetry()
+    public Optional<@Min(0) Integer> getMaxCommitRetry()
     {
         return maxCommitRetry;
     }
 
     @Config("iceberg.max-commit-retry")
     @ConfigDescription("Number of times to retry a commit before failing")
-    public IcebergConfig setMaxCommitRetry(int maxCommitRetry)
+    public IcebergConfig setMaxCommitRetry(Integer maxCommitRetry)
     {
-        this.maxCommitRetry = maxCommitRetry;
+        this.maxCommitRetry = Optional.ofNullable(maxCommitRetry);
         return this;
     }
 
@@ -492,6 +492,34 @@ public class IcebergConfig
     public IcebergConfig setSplitManagerThreads(String splitManagerThreads)
     {
         this.splitManagerThreads = ThreadCount.valueOf(splitManagerThreads).getThreadCount();
+        return this;
+    }
+
+    @Min(0)
+    public int getPlanningThreads()
+    {
+        return planningThreads;
+    }
+
+    @Config("iceberg.planning-threads")
+    @ConfigDescription("Number of threads to use for metadata scans in planning")
+    public IcebergConfig setPlanningThreads(String planningThreads)
+    {
+        this.planningThreads = ThreadCount.valueOf(planningThreads).getThreadCount();
+        return this;
+    }
+
+    @Min(0)
+    public int getFileDeleteThreads()
+    {
+        return fileDeleteThreads;
+    }
+
+    @Config("iceberg.file-delete-threads")
+    @ConfigDescription("Number of threads to use for deleting files when running expire_snapshots procedure")
+    public IcebergConfig setFileDeleteThreads(String fileDeleteThreads)
+    {
+        this.fileDeleteThreads = ThreadCount.valueOf(fileDeleteThreads).getThreadCount();
         return this;
     }
 

@@ -23,7 +23,9 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
+import io.trino.execution.StageId;
 import io.trino.execution.StageInfo;
+import io.trino.execution.StagesInfo;
 import io.trino.filesystem.FileIterator;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
@@ -33,7 +35,6 @@ import io.trino.metadata.TableHandle;
 import io.trino.operator.OperatorStats;
 import io.trino.plugin.hive.HiveCompressionCodec;
 import io.trino.plugin.hive.TestingHivePlugin;
-import io.trino.plugin.iceberg.fileio.ForwardingFileIo;
 import io.trino.server.DynamicFilterService;
 import io.trino.spi.QueryId;
 import io.trino.spi.connector.ColumnHandle;
@@ -72,9 +73,7 @@ import org.apache.iceberg.util.JsonUtil;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.parallel.Isolated;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -86,6 +85,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -120,6 +120,8 @@ import static io.trino.SystemSessionProperties.TASK_MAX_WRITER_COUNT;
 import static io.trino.SystemSessionProperties.TASK_MIN_WRITER_COUNT;
 import static io.trino.SystemSessionProperties.TASK_SCALE_WRITERS_ENABLED;
 import static io.trino.SystemSessionProperties.USE_PREFERRED_WRITE_PARTITIONING;
+import static io.trino.hive.formats.compression.CompressionKind.ZSTD;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static io.trino.plugin.iceberg.IcebergFileFormat.AVRO;
 import static io.trino.plugin.iceberg.IcebergFileFormat.ORC;
 import static io.trino.plugin.iceberg.IcebergFileFormat.PARQUET;
@@ -129,10 +131,13 @@ import static io.trino.plugin.iceberg.IcebergSessionProperties.COLLECT_EXTENDED_
 import static io.trino.plugin.iceberg.IcebergSessionProperties.DYNAMIC_FILTERING_WAIT_TIMEOUT;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.EXTENDED_STATISTICS_ENABLED;
 import static io.trino.plugin.iceberg.IcebergSplitManager.ICEBERG_DOMAIN_COMPACTION_THRESHOLD;
+import static io.trino.plugin.iceberg.IcebergTableProperties.isCompressionCodecSupportedForFormat;
+import static io.trino.plugin.iceberg.IcebergTestUtils.FILE_IO_FACTORY;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getFileSystemFactory;
 import static io.trino.plugin.iceberg.IcebergTestUtils.withSmallRowGroups;
 import static io.trino.plugin.iceberg.IcebergUtil.TRINO_QUERY_ID_NAME;
 import static io.trino.plugin.iceberg.IcebergUtil.TRINO_USER_NAME;
+import static io.trino.plugin.iceberg.IcebergUtil.getCompressionPropertyName;
 import static io.trino.plugin.iceberg.IcebergUtil.getLatestMetadataLocation;
 import static io.trino.spi.predicate.Domain.multipleValues;
 import static io.trino.spi.predicate.Domain.singleValue;
@@ -152,7 +157,6 @@ import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.testing.assertions.Assert.assertEventually;
-import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -160,7 +164,6 @@ import static java.time.ZoneOffset.UTC;
 import static java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 import static java.util.Collections.nCopies;
 import static java.util.Locale.ENGLISH;
-import static java.util.Map.entry;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -170,14 +173,14 @@ import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.range;
 import static org.apache.iceberg.TableMetadata.newTableMetadata;
+import static org.apache.iceberg.TableProperties.AVRO_COMPRESSION;
+import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
+import static org.apache.iceberg.TableProperties.PARQUET_COMPRESSION;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.offset;
 import static org.junit.jupiter.api.Assumptions.abort;
-import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
-@Isolated // TODO remove
-@TestInstance(PER_CLASS)
 public abstract class BaseIcebergConnectorTest
         extends BaseConnectorTest
 {
@@ -242,6 +245,8 @@ public abstract class BaseIcebergConnectorTest
             case SUPPORTS_CREATE_OR_REPLACE_TABLE,
                  SUPPORTS_REPORTING_WRITTEN_BYTES -> true;
             case SUPPORTS_ADD_COLUMN_NOT_NULL_CONSTRAINT,
+                 SUPPORTS_DEFAULT_COLUMN_VALUE,
+                 SUPPORTS_REFRESH_VIEW,
                  SUPPORTS_RENAME_MATERIALIZED_VIEW_ACROSS_SCHEMAS,
                  SUPPORTS_TOPN_PUSHDOWN -> false;
             default -> super.hasBehavior(connectorBehavior);
@@ -378,8 +383,7 @@ public abstract class BaseIcebergConnectorTest
                         "WITH (\n" +
                         "   format = '" + format.name() + "',\n" +
                         "   format_version = 2,\n" +
-                        "   location = '\\E.*/tpch/orders-.*\\Q',\n" +
-                        "   max_commit_retry = 4\n" +
+                        "   location = '\\E.*/tpch/orders-.*\\Q'\n" +
                         ")\\E");
     }
 
@@ -1072,10 +1076,10 @@ public abstract class BaseIcebergConnectorTest
                 "\\QUnable to parse partitioning value: Cannot partition by non-primitive source field: struct<3: child: optional string>");
         assertQueryFails(
                 "CREATE TABLE test_partitioned_table_nested_field_inside_array (parent ARRAY(ROW(child VARCHAR))) WITH (partitioning = ARRAY['\"parent.child\"'])",
-                "\\QPartitioning field [parent.element.child] cannot be contained in a array");
+                "\\QUnable to parse partitioning value: Invalid partition field parent: list<struct<3: child: optional string>>");
         assertQueryFails(
                 "CREATE TABLE test_partitioned_table_nested_field_inside_map (parent MAP(ROW(child INTEGER), ARRAY(VARCHAR))) WITH (partitioning = ARRAY['\"parent.key.child\"'])",
-                "\\QPartitioning field [parent.key.child] cannot be contained in a map");
+                "\\QUnable to parse partitioning value: Invalid partition field parent: map<struct<4: child: optional int>, list<string>>");
         assertQueryFails(
                 "CREATE TABLE test_partitioned_table_nested_field_year_transform_in_string (parent ROW(child VARCHAR)) WITH (partitioning = ARRAY['year(\"parent.child\")'])",
                 "\\QUnable to parse partitioning value: Invalid source type string for transform: year");
@@ -1282,7 +1286,6 @@ public abstract class BaseIcebergConnectorTest
                         "   format = '%s',\n" +
                         "   format_version = 2,\n" +
                         "   location = '%s',\n" +
-                        "   max_commit_retry = 4,\n" +
                         "   partitioning = ARRAY['order_status','ship_priority','bucket(\"order key\", 9)']\n" +
                         ")",
                 getSession().getCatalog().orElseThrow(),
@@ -1645,8 +1648,7 @@ public abstract class BaseIcebergConnectorTest
                 "WITH (\n" +
                 format("   format = '%s',\n", format) +
                 "   format_version = 2,\n" +
-                format("   location = '%s',\n", tempDirPath) +
-                "   max_commit_retry = 4\n" +
+                format("   location = '%s'\n", tempDirPath) +
                 ")";
         String createTableWithoutComment = "" +
                 "CREATE TABLE iceberg.tpch.test_table_comments (\n" +
@@ -1655,8 +1657,7 @@ public abstract class BaseIcebergConnectorTest
                 "WITH (\n" +
                 "   format = '" + format + "',\n" +
                 "   format_version = 2,\n" +
-                "   location = '" + tempDirPath + "',\n" +
-                "   max_commit_retry = 4\n" +
+                "   location = '" + tempDirPath + "'\n" +
                 ")";
         String createTableSql = format(createTableTemplate, "test table comment", format);
         assertUpdate(createTableSql);
@@ -1815,6 +1816,16 @@ public abstract class BaseIcebergConnectorTest
     }
 
     @Test
+    void testDropHiddenMetadataColumn()
+    {
+        try (TestTable table = newTrinoTable("test_drop_metadata_column_", "(id int, col int)")) {
+            assertQueryFails("ALTER TABLE " + table.getName() + " DROP COLUMN \"$partition\"", "line 1:1: Cannot drop hidden column");
+            assertQueryFails("ALTER TABLE " + table.getName() + " DROP COLUMN \"$path\"", "line 1:1: Cannot drop hidden column");
+            assertQueryFails("ALTER TABLE " + table.getName() + " DROP COLUMN \"$file_modified_time\"", "line 1:1: Cannot drop hidden column");
+        }
+    }
+
+    @Test
     public void testDropColumnUsedInOlderPartitionSpecs()
     {
         String tableName = "test_drop_partition_column_" + randomNameSuffix();
@@ -1953,7 +1964,6 @@ public abstract class BaseIcebergConnectorTest
                            format = '%s',
                            format_version = 2,
                            location = '%s',
-                           max_commit_retry = 4,
                            partitioning = ARRAY['adate']
                         )""",
                 format,
@@ -1969,8 +1979,7 @@ public abstract class BaseIcebergConnectorTest
                         WITH (
                            format = '%s',
                            format_version = 2,
-                           location = '%s',
-                           max_commit_retry = 4
+                           location = '%s'
                         )""",
                 format,
                 getTableLocation("test_create_table_like_copy1")));
@@ -1981,8 +1990,7 @@ public abstract class BaseIcebergConnectorTest
                         WITH (
                            format = '%s',
                            format_version = 2,
-                           location = '%s',
-                           max_commit_retry = 4
+                           location = '%s'
                         )""",
                 format,
                 getTableLocation("test_create_table_like_copy2")));
@@ -5094,8 +5102,8 @@ public abstract class BaseIcebergConnectorTest
         String tableLocation = getTableLocation(tableName);
         String metadataLocation = getLatestMetadataLocation(fileSystem, tableLocation);
 
-        TableMetadata tableMetadata = TableMetadataParser.read(new ForwardingFileIo(fileSystem), metadataLocation);
-        ImmutableMap<String, String> newProperties = ImmutableMap.<String, String>builder()
+        TableMetadata tableMetadata = TableMetadataParser.read(FILE_IO_FACTORY.create(fileSystem), metadataLocation);
+        Map<String, String> newProperties = ImmutableMap.<String, String>builder()
                 .putAll(tableMetadata.properties())
                 .put("orc.bloom.filter.columns", "x,y") // legacy incorrect property
                 .put("orc.bloom.filter.fpp", "0.2") // legacy incorrect property
@@ -5333,12 +5341,13 @@ public abstract class BaseIcebergConnectorTest
                         SELECT * FROM TABLE(sequence(start => 0, stop => 100, step => 1))
                         """)
                 .queryId();
-        StageInfo writerStage = getDistributedQueryRunner().getCoordinator()
+        StagesInfo stagesInfo = getDistributedQueryRunner()
+                .getCoordinator()
                 .getFullQueryInfo(id)
-                .getOutputStage()
-                .orElseThrow()
-                .getSubStages()
-                .getFirst();
+                .getStages()
+                .orElseThrow();
+        StageId outputStageId = stagesInfo.getOutputStageId();
+        StageInfo writerStage = stagesInfo.getSubStages(outputStageId).getFirst();
         assertThat(PlanNodeSearcher.searchFrom(writerStage.getPlan().getRoot()).whereIsInstanceOfAny(TableWriterNode.class).matches()).isTrue();
         assertThat(writerStage.getTasks().size()).isEqualTo(1);
 
@@ -5449,7 +5458,7 @@ public abstract class BaseIcebergConnectorTest
         }
     }
 
-    @Test()
+    @Test
     public void testOptimizeTimePartitionedTable()
     {
         testOptimizeTimePartitionedTable("date", "%s", 15);
@@ -6605,6 +6614,22 @@ public abstract class BaseIcebergConnectorTest
     }
 
     @Test
+    public void testRemoveOrphanFilesWithUnexpectedMissingManifest()
+            throws Exception
+    {
+        String tableName = "test_remove_orphan_files_with_missing_manifest_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (key varchar, value integer)");
+        assertUpdate("INSERT INTO " + tableName + " VALUES ('one', 1)", 1);
+        String manifestFileToRemove = (String) computeScalar("SELECT path FROM \"" + tableName + "$manifests\"");
+        fileSystem.deleteFile(Location.of(manifestFileToRemove));
+
+        assertThat(query("ALTER TABLE " + tableName + " EXECUTE REMOVE_ORPHAN_FILES"))
+                .failure()
+                .hasErrorCode(ICEBERG_INVALID_METADATA)
+                .hasMessage("Manifest file does not exist: " + manifestFileToRemove);
+    }
+
+    @Test
     public void testRemoveOrphanFiles()
             throws Exception
     {
@@ -6800,6 +6825,219 @@ public abstract class BaseIcebergConnectorTest
         assertQuery("SELECT count(*) FROM \"" + tableName + "$files\" WHERE file_path LIKE '%.parquet'", "VALUES 1");
 
         assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testCreateTableAsWithCompressionCodecs()
+    {
+        String compressionProperty = getCompressionPropertyName(format);
+
+        for (HiveCompressionCodec compressionCodec : getCompressionCodecs(Optional.empty())) {
+            String tableName = format("test_ctas_%s_codec_%s_%s", compressionCodec.name(), format, randomNameSuffix());
+            if (isCompressionCodecSupportedForFormat(format, compressionCodec)) {
+                assertUpdate(
+                        format("CREATE TABLE %s WITH (format = '%s', compression_codec = '%s') AS SELECT * FROM nation", tableName, format, compressionCodec.name()),
+                        "SELECT count(*) FROM nation");
+
+                assertThat(getTableProperties(tableName))
+                        .containsEntry(DEFAULT_FILE_FORMAT, format.toString())
+                        .containsEntry(compressionProperty, compressionCodec.name());
+
+                assertThat(query("SELECT * FROM " + tableName)).matches("SELECT * FROM nation");
+                assertThat(query(format("SELECT count(*) FROM \"%s$files\" WHERE file_path LIKE '%%.%s'", tableName, format.name().toLowerCase(ENGLISH))))
+                        .matches("SELECT BIGINT '1'");
+
+                assertUpdate(
+                        "INSERT INTO " + tableName + " SELECT * FROM nation WHERE nationkey >= 10",
+                        "SELECT count(*) FROM nation WHERE nationkey >= 10");
+
+                assertUpdate("DROP TABLE " + tableName);
+            }
+            else {
+                assertQueryFails(
+                        format("CREATE TABLE %s WITH (format = '%s', compression_codec = '%s') AS SELECT * FROM nation", tableName, format, compressionCodec.name()),
+                        "Compression codec LZ4 not supported for .*");
+            }
+        }
+    }
+
+    @Test
+    public void testCreateTableAsWithCompressionCodecUnsupported()
+    {
+        String tableName = format("test_ctas_unsupported_%s_%s", format, randomNameSuffix());
+
+        assertQueryFails("CREATE TABLE " + tableName + " WITH (format = '" + format + "', compression_codec = 'unsupported') AS SELECT * FROM nation",
+                ".* \\QUnable to set catalog 'iceberg' table property 'compression_codec' to ['unsupported']: Invalid value [unsupported]. Valid values: [NONE, SNAPPY, LZ4, ZSTD, GZIP]");
+    }
+
+    @Test
+    public void testUpdatingOnlyCompressionCodec()
+    {
+        String tableName = "test_updating_compression_codec_" + randomNameSuffix();
+        HiveCompressionCodec initialCompressionCodec = HiveCompressionCodec.ZSTD;
+
+        List<HiveCompressionCodec> compressionCodecs = getCompressionCodecs(Optional.of(initialCompressionCodec));
+
+        for (HiveCompressionCodec compressionCodec : compressionCodecs) {
+            String compressionProperty = getCompressionPropertyName(format);
+            String newCompressionCodec = compressionCodec.name();
+
+            assertThat(query(format("CREATE TABLE %s WITH (format = '%s', compression_codec = '%s') AS SELECT * FROM nation WHERE nationkey < 10", tableName, format, initialCompressionCodec)))
+                    .matches("SELECT count(*) FROM nation WHERE nationkey < 10");
+            assertThat(getTableProperties(tableName))
+                    .containsEntry(DEFAULT_FILE_FORMAT, format.toString())
+                    .containsEntry(compressionProperty, initialCompressionCodec.name());
+
+            if (isCompressionCodecSupportedForFormat(format, compressionCodec)) {
+                assertUpdate(format("ALTER TABLE %s SET PROPERTIES compression_codec = '%s'", tableName, newCompressionCodec));
+                assertThat(getTableProperties(tableName))
+                        .containsEntry(DEFAULT_FILE_FORMAT, format.toString())
+                        .containsEntry(compressionProperty, newCompressionCodec);
+                assertUpdate(
+                        "INSERT INTO " + tableName + " SELECT * FROM nation WHERE nationkey >= 10",
+                        "SELECT count(*) FROM nation WHERE nationkey >= 10");
+
+                assertThat(query("SELECT * FROM " + tableName)).matches("SELECT * FROM nation");
+                assertThat(query(format("SELECT count(*) FROM \"%s$files\" WHERE file_path LIKE '%%.%s'", tableName, format.name().toLowerCase(ENGLISH))))
+                        .matches("SELECT BIGINT '2'");
+            }
+            else {
+                assertQueryFails(
+                        format("ALTER TABLE %s SET PROPERTIES compression_codec = '%s'", tableName, newCompressionCodec),
+                        "Compression codec LZ4 not supported for .*");
+            }
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    @Test
+    public void testUpdatingOnlyFileFormat()
+    {
+        String tableName = "test_updating_compression_codec_" + randomNameSuffix();
+
+        List<IcebergFileFormat> newFileFormats = getFileFormats(format);
+
+        for (IcebergFileFormat fileFormat : newFileFormats) {
+            for (HiveCompressionCodec compressionCodec : getCompressionCodecs(Optional.empty())) {
+                String compressionProperty = getCompressionPropertyName(format);
+
+                ImmutableMap.Builder<IcebergFileFormat, Integer> fileCounter = ImmutableMap.builder();
+
+                if (isCompressionCodecSupportedForFormat(format, compressionCodec)) {
+                    assertUpdate(
+                            format("CREATE TABLE %s WITH (format = '%s', compression_codec = '%s') AS SELECT * FROM nation WHERE nationkey < 10", tableName, format, compressionCodec),
+                            "SELECT count(*) FROM nation WHERE nationkey < 10");
+
+                    assertThat(getTableProperties(tableName))
+                            .containsEntry(DEFAULT_FILE_FORMAT, format.toString())
+                            .containsEntry(compressionProperty, compressionCodec.name());
+
+                    fileCounter.put(format, 1);
+
+                    compressionProperty = getCompressionPropertyName(fileFormat);
+
+                    if (isCompressionCodecSupportedForFormat(fileFormat, compressionCodec)) {
+                        assertUpdate("ALTER TABLE " + tableName + " SET PROPERTIES format = '" + fileFormat + "'");
+                        assertThat(getTableProperties(tableName))
+                                .containsEntry(DEFAULT_FILE_FORMAT, fileFormat.toString())
+                                .containsEntry(compressionProperty, compressionCodec.name());
+                        assertUpdate(
+                                "INSERT INTO " + tableName + " SELECT * FROM nation WHERE nationkey >= 10",
+                                "SELECT count(*) FROM nation WHERE nationkey >= 10");
+                        fileCounter.put(fileFormat, 1);
+
+                        assertThat(query("SELECT * FROM " + tableName)).matches("SELECT * FROM nation");
+
+                        // Verify number of files per suffix
+                        for (Map.Entry<IcebergFileFormat, Integer> entry : fileCounter.buildOrThrow().entrySet()) {
+                            assertThat(query(format("SELECT count(*) FROM \"%s$files\" WHERE file_path LIKE '%%.%s'", tableName, entry.getKey().name().toLowerCase(ENGLISH))))
+                                    .matches("SELECT BIGINT '1'");
+                        }
+                    }
+                    else {
+                        assertQueryFails("ALTER TABLE " + tableName + " SET PROPERTIES format = '" + fileFormat + "'",
+                                "Compression codec LZ4 not supported for .*");
+                    }
+
+                    assertUpdate("DROP TABLE " + tableName);
+                }
+                else {
+                    assertQueryFails(format("CREATE TABLE %s WITH (format = '%s', compression_codec = '%s') AS SELECT * FROM nation", tableName, format, compressionCodec),
+                            "Compression codec LZ4 not supported for .*");
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testUpdatingCompressionCodecBothFileFormatAndCompression()
+    {
+        String tableName = "test_updating_file_format_compression_codec_" + randomNameSuffix();
+        HiveCompressionCodec initialCompressionCodec = HiveCompressionCodec.ZSTD;
+
+        List<IcebergFileFormat> newFileFormats = getFileFormats(format);
+
+        for (IcebergFileFormat fileFormat : newFileFormats) {
+            List<HiveCompressionCodec> compressionCodecs = getCompressionCodecs(Optional.of(initialCompressionCodec));
+            for (HiveCompressionCodec compressionCodec : compressionCodecs) {
+                String compressionProperty = getCompressionPropertyName(format);
+                String newCompressionCodec = compressionCodec.name();
+
+                ImmutableMap.Builder<IcebergFileFormat, Integer> fileCounter = ImmutableMap.builder();
+
+                // Create initial table
+                assertUpdate(
+                        format("CREATE TABLE %s WITH (format = '%s', compression_codec = '%s') AS SELECT * FROM nation WHERE nationkey < 10", tableName, format, initialCompressionCodec),
+                        "SELECT count(*) FROM nation WHERE nationkey < 10");
+                assertThat(getTableProperties(tableName))
+                        .containsEntry(DEFAULT_FILE_FORMAT, format.toString())
+                        .containsEntry(compressionProperty, initialCompressionCodec.name());
+
+                fileCounter.put(format, 1);
+
+                compressionProperty = getCompressionPropertyName(fileFormat);
+
+                // Modify both storage and compression properties
+                if (isCompressionCodecSupportedForFormat(fileFormat, compressionCodec)) {
+                    assertUpdate(format("ALTER TABLE %s SET PROPERTIES format = '%s', compression_codec = '%s'", tableName, fileFormat, newCompressionCodec));
+                    assertThat(getTableProperties(tableName))
+                            .containsEntry(DEFAULT_FILE_FORMAT, fileFormat.toString())
+                            .containsEntry(compressionProperty, newCompressionCodec);
+                    assertUpdate(
+                            "INSERT INTO " + tableName + " SELECT * FROM nation WHERE nationkey >= 10",
+                            "SELECT count(*) FROM nation WHERE nationkey >= 10");
+                    fileCounter.put(fileFormat, 1);
+
+                    assertThat(query("SELECT * FROM " + tableName)).matches("SELECT * FROM nation");
+
+                    // Verify number of files per suffix
+                    for (Map.Entry<IcebergFileFormat, Integer> entry : fileCounter.buildOrThrow().entrySet()) {
+                        assertThat(query(format("SELECT count(*) FROM \"%s$files\" WHERE file_path LIKE '%%.%s'", tableName, entry.getKey().name().toLowerCase(ENGLISH))))
+                                .matches("SELECT BIGINT '1'");
+                    }
+                }
+                else {
+                    assertQueryFails(format("ALTER TABLE %s SET PROPERTIES format = '%s', compression_codec = '%s'", tableName, fileFormat, newCompressionCodec),
+                            "Compression codec LZ4 not supported for .*");
+                }
+
+                assertUpdate("DROP TABLE " + tableName);
+            }
+        }
+    }
+
+    @Test
+    public void testUpdatingFileFormatCompressionMixed()
+    {
+        try (TestTable table = newTrinoTable("test_updating_file_format_compression_mixed", "WITH (format = 'AVRO') AS SELECT * FROM nation")) {
+            assertThat(getTableProperties(table.getName())).doesNotContainKey(PARQUET_COMPRESSION);
+
+            assertUpdate("ALTER TABLE " + table.getName() + " SET PROPERTIES compression_codec = 'ZSTD'");
+
+            assertThat(getTableProperties(table.getName()))
+                    .containsEntry(DEFAULT_FILE_FORMAT, AVRO.name())
+                    .containsEntry(AVRO_COMPRESSION, ZSTD.name());
+        }
     }
 
     @Test
@@ -7851,7 +8089,7 @@ public abstract class BaseIcebergConnectorTest
 
         String tableLocation = getTableLocation(tableName);
         String metadataLocation = getLatestMetadataLocation(fileSystem, tableLocation);
-        TableMetadata tableMetadata = TableMetadataParser.read(new ForwardingFileIo(fileSystem), metadataLocation);
+        TableMetadata tableMetadata = TableMetadataParser.read(FILE_IO_FACTORY.create(fileSystem), metadataLocation);
         Location currentSnapshotFile = Location.of(tableMetadata.currentSnapshot().manifestListLocation());
 
         // Delete current snapshot file
@@ -7877,7 +8115,7 @@ public abstract class BaseIcebergConnectorTest
 
         String tableLocation = getTableLocation(tableName);
         String metadataLocation = getLatestMetadataLocation(fileSystem, tableLocation);
-        FileIO fileIo = new ForwardingFileIo(fileSystem);
+        FileIO fileIo = FILE_IO_FACTORY.create(fileSystem);
         TableMetadata tableMetadata = TableMetadataParser.read(fileIo, metadataLocation);
         Location manifestListFile = Location.of(tableMetadata.currentSnapshot().allManifests(fileIo).get(0).path());
 
@@ -8558,82 +8796,6 @@ public abstract class BaseIcebergConnectorTest
     }
 
     @Test
-    public void testCreateTableWithCompressionCodec()
-    {
-        for (HiveCompressionCodec compressionCodec : HiveCompressionCodec.values()) {
-            testCreateTableWithCompressionCodec(compressionCodec);
-        }
-    }
-
-    private void testCreateTableWithCompressionCodec(HiveCompressionCodec compressionCodec)
-    {
-        Session session = Session.builder(getSession())
-                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "compression_codec", compressionCodec.name())
-                .build();
-        String tableName = "test_table_with_compression_" + compressionCodec;
-        String createTableSql = format("CREATE TABLE %s AS SELECT * FROM tpch.tiny.nation WITH NO DATA", tableName);
-        if (format == AVRO && compressionCodec == HiveCompressionCodec.LZ4) {
-            assertTrinoExceptionThrownBy(() -> computeActual(session, createTableSql))
-                    .hasMessage("Compression codec LZ4 not supported for " + format.humanName());
-            return;
-        }
-        assertUpdate(session, createTableSql, 0);
-        verifyCodecInIcebergTableProperties(tableName, compressionCodec);
-        String insertIntoSql = format("INSERT INTO %s SELECT * FROM tpch.tiny.nation", tableName);
-        // TODO (https://github.com/trinodb/trino/issues/9142) Support LZ4 compression with native Parquet writer
-        if (format == IcebergFileFormat.PARQUET && compressionCodec == HiveCompressionCodec.LZ4) {
-            assertTrinoExceptionThrownBy(() -> computeActual(session, insertIntoSql))
-                    .hasMessage("Compression codec LZ4 not supported for " + format.humanName());
-            return;
-        }
-        assertUpdate(session, insertIntoSql, 25);
-        assertQuery("SELECT * FROM " + tableName, "SELECT * FROM nation");
-        assertQuery("SELECT count(*) FROM " + tableName, "VALUES 25");
-        assertUpdate("DROP TABLE " + tableName);
-    }
-
-    protected void verifyCodecInIcebergTableProperties(String tableName, HiveCompressionCodec codec)
-    {
-        assertThat(tableName).isNotNull();
-        Optional<String> codecName = switch (format) {
-            case AVRO -> switch (codec) {
-                case NONE -> Optional.of("uncompressed");
-                case SNAPPY -> Optional.of("snappy");
-                case LZ4 -> Optional.empty(); // codec unsupported by Iceberg
-                case ZSTD -> Optional.of("zstd");
-                case GZIP -> Optional.of("gzip");
-            };
-            case ORC -> switch (codec) {
-                case NONE -> Optional.of("none");
-                case SNAPPY -> Optional.of("snappy");
-                case LZ4 -> Optional.of("lz4");
-                case ZSTD -> Optional.of("zstd");
-                case GZIP -> Optional.of("zlib");
-            };
-            case PARQUET -> switch (codec) {
-                case NONE -> Optional.of("uncompressed");
-                case SNAPPY -> Optional.of("snappy");
-                case LZ4 -> Optional.of("lz4");
-                case ZSTD -> Optional.of("zstd");
-                case GZIP -> Optional.of("gzip");
-            };
-        };
-        Map<String, String> actual = getTableProperties(tableName);
-        assertThat(actual).contains(entry("write.format.default", format.name()));
-        codecName.ifPresent(name -> assertThat(actual).contains(entry("write.%s.compression-codec".formatted(format.name().toLowerCase(ENGLISH)), name)));
-        if (format != PARQUET) {
-            // this is incorrectly persisted in Iceberg: https://github.com/trinodb/trino/issues/20401
-            assertThat(actual).contains(entry("write.parquet.compression-codec", "zstd"));
-        }
-    }
-
-    private Map<String, String> getTableProperties(String tableName)
-    {
-        return computeActual("SELECT key, value FROM \"" + tableName + "$properties\"").getMaterializedRows().stream()
-                .collect(toImmutableMap(row -> (String) row.getField(0), row -> (String) row.getField(1)));
-    }
-
-    @Test
     public void testTypeCoercionOnCreateTableAsSelect()
     {
         for (TypeCoercionTestSetup setup : typeCoercionOnCreateTableAsSelectProvider()) {
@@ -8978,6 +9140,14 @@ public abstract class BaseIcebergConnectorTest
         }
     }
 
+    @Test
+    void testExplainAnalyzeSplitSourceMetrics()
+    {
+        assertExplainAnalyze(
+                "EXPLAIN ANALYZE VERBOSE SELECT * FROM nation a",
+                "splits generation metrics");
+    }
+
     // regression test for https://github.com/trinodb/trino/issues/22922
     @Test
     void testArrayElementChange()
@@ -8990,7 +9160,7 @@ public abstract class BaseIcebergConnectorTest
             assertUpdate("ALTER TABLE " + table.getName() + " ADD COLUMN col.element.c varchar");
             assertUpdate("ALTER TABLE " + table.getName() + " DROP COLUMN col.element.b");
 
-            String expected = format == ORC ? "CAST(array[row(NULL)] AS array(row(c varchar)))" : "CAST(NULL AS array(row(c varchar)))";
+            String expected = format == ORC || format == AVRO ? "CAST(array[row(NULL)] AS array(row(c varchar)))" : "CAST(NULL AS array(row(c varchar)))";
             assertThat(query("SELECT * FROM " + table.getName()))
                     .matches("VALUES " + expected);
         }
@@ -9312,5 +9482,25 @@ public abstract class BaseIcebergConnectorTest
                 assertThat(tablePartitioning.active()).isFalse();
             }
         };
+    }
+
+    private Map<String, String> getTableProperties(String tableName)
+    {
+        return computeActual("SELECT key, value FROM \"" + tableName + "$properties\"").getMaterializedRows().stream()
+                .collect(toImmutableMap(row -> (String) row.getField(0), row -> (String) row.getField(1)));
+    }
+
+    private static List<HiveCompressionCodec> getCompressionCodecs(Optional<HiveCompressionCodec> codecToExclude)
+    {
+        return Arrays.stream(HiveCompressionCodec.values())
+                .filter(codec -> !(codecToExclude.isPresent() && codec.equals(codecToExclude.get())))
+                .collect(toImmutableList());
+    }
+
+    private static List<IcebergFileFormat> getFileFormats(IcebergFileFormat fileFormatToExclude)
+    {
+        return Arrays.stream(IcebergFileFormat.values())
+                .filter(format -> !format.equals(fileFormatToExclude))
+                .collect(toImmutableList());
     }
 }

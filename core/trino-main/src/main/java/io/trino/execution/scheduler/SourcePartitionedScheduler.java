@@ -22,8 +22,8 @@ import io.airlift.log.Logger;
 import io.trino.execution.RemoteTask;
 import io.trino.execution.TableExecuteContext;
 import io.trino.execution.TableExecuteContextManager;
-import io.trino.metadata.InternalNode;
 import io.trino.metadata.Split;
+import io.trino.node.InternalNode;
 import io.trino.server.DynamicFilterService;
 import io.trino.split.EmptySplit;
 import io.trino.split.SplitSource;
@@ -247,7 +247,7 @@ public class SourcePartitionedScheduler
                 nextSplitBatchFuture = splitSource.getNextBatch(splitBatchSize);
 
                 long start = System.nanoTime();
-                addSuccessCallback(nextSplitBatchFuture, () -> stageExecution.recordGetSplitTime(start));
+                addSuccessCallback(nextSplitBatchFuture, () -> stageExecution.recordSplitSourceMetrics(partitionedNode, splitSource.getMetrics(), start));
             }
 
             if (nextSplitBatchFuture.isDone()) {
@@ -379,7 +379,7 @@ public class SourcePartitionedScheduler
     {
         ImmutableSet.Builder<RemoteTask> newTasks = ImmutableSet.builder();
 
-        ImmutableSet<InternalNode> nodes = ImmutableSet.copyOf(splitAssignment.keySet());
+        Set<InternalNode> nodes = ImmutableSet.copyOf(splitAssignment.keySet());
         for (InternalNode node : nodes) {
             // source partitioned tasks can only receive broadcast data; otherwise it would have a different distribution
             ImmutableMultimap<PlanNodeId, Split> splits = ImmutableMultimap.<PlanNodeId, Split>builder()

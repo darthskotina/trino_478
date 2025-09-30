@@ -32,11 +32,13 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import org.joda.time.DateTimeZone;
 
+import java.nio.file.Path;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.TimeUnit;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
@@ -140,6 +142,7 @@ public class HiveConfig
     private Duration fileStatusCacheExpireAfterWrite = new Duration(1, MINUTES);
     private DataSize fileStatusCacheMaxRetainedSize = DataSize.of(1, GIGABYTE);
     private List<String> fileStatusCacheTables = ImmutableList.of();
+    private List<String> fileStatusCacheExcludedTables = ImmutableList.of();
     private DataSize perTransactionFileStatusCacheMaxRetainedSize = DataSize.of(100, MEGABYTE);
 
     private boolean translateHiveViews;
@@ -175,6 +178,10 @@ public class HiveConfig
     private S3GlacierFilter s3GlacierFilter = S3GlacierFilter.READ_ALL;
 
     private int metadataParallelism = 8;
+
+    private Path protobufDescriptorsLocation;
+    private Duration protobufDescriptorsCacheRefreshInterval = new Duration(1, TimeUnit.DAYS);
+    private long protobufDescriptorsCacheMaxSize = 64;
 
     public boolean isSingleStatementWritesOnly()
     {
@@ -771,6 +778,19 @@ public class HiveConfig
         return this;
     }
 
+    public List<String> getFileStatusCacheExcludedTables()
+    {
+        return fileStatusCacheExcludedTables;
+    }
+
+    @Config("hive.file-status-cache.excluded-tables")
+    @ConfigDescription("List of tables that should be excluded from file status caching")
+    public HiveConfig setFileStatusCacheExcludedTables(List<String> fileStatusCacheExcludedTables)
+    {
+        this.fileStatusCacheExcludedTables = ImmutableList.copyOf(fileStatusCacheExcludedTables);
+        return this;
+    }
+
     @MinDataSize("0MB")
     @NotNull
     public DataSize getPerTransactionFileStatusCacheMaxRetainedSize()
@@ -1280,6 +1300,45 @@ public class HiveConfig
     public HiveConfig setMetadataParallelism(int metadataParallelism)
     {
         this.metadataParallelism = metadataParallelism;
+        return this;
+    }
+
+    public Path getProtobufDescriptorsLocation()
+    {
+        return protobufDescriptorsLocation;
+    }
+
+    @ConfigDescription("Directory where binary protobuf descriptors are stored to use for deserializing protobufs")
+    @Config("hive.protobuf.descriptors.location")
+    public HiveConfig setProtobufDescriptorsLocation(Path protobufDescriptorsLocation)
+    {
+        this.protobufDescriptorsLocation = protobufDescriptorsLocation;
+        return this;
+    }
+
+    public long getProtobufDescriptorsCacheMaxSize()
+    {
+        return protobufDescriptorsCacheMaxSize;
+    }
+
+    @ConfigDescription("The maximum amount of protobuf descriptors to keep in memory")
+    @Config("hive.protobuf.descriptors.cache.max-size")
+    public HiveConfig setProtobufDescriptorsCacheMaxSize(long size)
+    {
+        this.protobufDescriptorsCacheMaxSize = size;
+        return this;
+    }
+
+    public Duration getProtobufDescriptorsCacheRefreshInterval()
+    {
+        return protobufDescriptorsCacheRefreshInterval;
+    }
+
+    @ConfigDescription("Interval on when loaded descriptors should be refreshed")
+    @Config("hive.protobuf.descriptors.cache.refresh-interval")
+    public HiveConfig setProtobufDescriptorsCacheRefreshInterval(Duration refreshInterval)
+    {
+        this.protobufDescriptorsCacheRefreshInterval = refreshInterval;
         return this;
     }
 }
