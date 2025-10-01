@@ -320,10 +320,10 @@ deploy-to-artifactory-manual:
 
       if [ $? -eq 0 ]; then
         echo "SUCCESS: Can write to repository"
-        # Clean up test file
+        # Clean up test file (ignore errors)
         wget --quiet --method=DELETE \
           --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
-          "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/test-upload-${CI_PIPELINE_ID}.txt"
+          "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/test-upload-${CI_PIPELINE_ID}.txt" || true
       else
         echo "ERROR: Cannot write to repository"
         echo "Upload test response: $UPLOAD_TEST"
