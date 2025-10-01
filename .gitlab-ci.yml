@@ -274,6 +274,62 @@ deploy-to-artifactory-manual:
     - chmod 600 ~/.m2/settings.xml
   script:
     - |
+      echo "=== Pre-deployment Token Check ==="
+      if [ -z "$JFROG_ACCESS_TOKEN" ]; then
+        echo "ERROR: Token lost before deployment!"
+        exit 1
+      else
+        echo "Token still present: ${#JFROG_ACCESS_TOKEN} characters"
+      fi
+
+    - |
+      echo "=== Testing Artifactory Connection ==="
+      TEST_RESPONSE=$(wget --spider --server-response \
+        --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+        "https://${ARTIFACTORY_URL}/artifactory/api/system/ping" 2>&1)
+
+      if echo "$TEST_RESPONSE" | grep -q "200 OK"; then
+        echo "SUCCESS: Can connect to Artifactory with token"
+      else
+        echo "ERROR: Cannot authenticate to Artifactory"
+        echo "Response: $TEST_RESPONSE"
+      fi
+
+    - |
+      echo "=== Checking repository permissions ==="
+      REPO_CHECK=$(wget --quiet --output-document - \
+        --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+        "https://${ARTIFACTORY_URL}/artifactory/api/repositories/maven-big-data-federated" 2>&1)
+
+      if [ $? -eq 0 ]; then
+        echo "Can access repository info"
+        echo "Repository details retrieved (first 200 chars): ${REPO_CHECK:0:200}"
+      else
+        echo "Cannot access repository - possible permission issue"
+        echo "Error details: $REPO_CHECK"
+      fi
+
+    - |
+      echo "=== Testing write permissions with a dummy file ==="
+      echo "test" > /tmp/test-${CI_PIPELINE_ID}.txt
+
+      UPLOAD_TEST=$(wget --quiet --output-document - --method=PUT \
+        --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+        --body-file=/tmp/test-${CI_PIPELINE_ID}.txt \
+        "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/test-upload-${CI_PIPELINE_ID}.txt" 2>&1)
+
+      if [ $? -eq 0 ]; then
+        echo "SUCCESS: Can write to repository"
+        # Clean up test file
+        wget --quiet --method=DELETE \
+          --header="Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+          "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/test-upload-${CI_PIPELINE_ID}.txt"
+      else
+        echo "ERROR: Cannot write to repository"
+        echo "Upload test response: $UPLOAD_TEST"
+      fi
+
+    - |
       apt-get update -qq && apt-get install -yqq zip
 
       check_artifact_exists() {
