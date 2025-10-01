@@ -1,3 +1,215 @@
+variables:
+  ARTIFACTORY_URL: artifactory.exness.io
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+  MAVEN_OPTS: "-Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+  TRINO_VERSION: "477"  # Base Trino version
+
+stages:
+  - build
+  - deploy
+
+# Define reusable script snippets as hidden jobs
+.version_setup_main:
+  script: &version_setup_main
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        # For tagged builds, use the tag directly as version
+        export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+      else
+        # For main branch, use TRINO_VERSION.minor format
+        # Get the latest tag that matches our version pattern
+        git fetch --tags
+        LAST_TAG=$(git tag -l "${TRINO_VERSION}.*" | sort -V | tail -n1)
+
+        if [ -z "$LAST_TAG" ]; then
+          # No existing tags, start with .1
+          export ARTIFACT_VERSION="${TRINO_VERSION}.1"
+        else
+          # Extract minor version and increment
+          MINOR_VERSION=$(echo $LAST_TAG | cut -d. -f2)
+          NEXT_MINOR=$((MINOR_VERSION + 1))
+          export ARTIFACT_VERSION="${TRINO_VERSION}.${NEXT_MINOR}"
+        fi
+
+        echo "Calculated version: $ARTIFACT_VERSION (based on last tag: ${LAST_TAG:-none})"
+      fi
+
+.version_setup_feature:
+  script: &version_setup_feature
+    - export BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        # For tagged builds, use the tag directly as version
+        export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+      else
+        # For feature branches, use TRINO_VERSION-branch-timestamp format
+        # CI_COMMIT_REF_SLUG is the branch name sanitized for use in URLs
+        export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_REF_SLUG}-${BUILD_TIMESTAMP}"
+        echo "Feature branch version: $ARTIFACT_VERSION"
+      fi
+
+build-trino:
+  stage: build
+  image: maven:3.9-eclipse-temurin-24
+  before_script:
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "main" ] || [ "$CI_COMMIT_BRANCH" = "master" ] || [ -n "$CI_COMMIT_TAG" ]; then
+        echo "Using main branch versioning"
+        git fetch --tags
+        if [ -n "$CI_COMMIT_TAG" ]; then
+          export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+        else
+          LAST_TAG=$(git tag -l "${TRINO_VERSION}.*" | sort -V | tail -n1)
+          if [ -z "$LAST_TAG" ]; then
+            export ARTIFACT_VERSION="${TRINO_VERSION}.1"
+          else
+            MINOR_VERSION=$(echo $LAST_TAG | cut -d. -f2)
+            NEXT_MINOR=$((MINOR_VERSION + 1))
+            export ARTIFACT_VERSION="${TRINO_VERSION}.${NEXT_MINOR}"
+          fi
+        fi
+      else
+        echo "Using feature branch versioning"
+        export BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_REF_SLUG}-${BUILD_TIMESTAMP}"
+      fi
+    - echo "Building version $ARTIFACT_VERSION"
+  script:
+    - echo "Building Trino plugins and core components..."
+    - |
+      ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true \
+        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,plugin/trino-storage,plugin/trino-random-functions,plugin/trino-api,plugin/trino-big-sequence,plugin/trino-convert-to-western-digits,plugin/trino-jwt,core/trino-main \
+        -am \
+        -T 1C
+
+    # Create directories for standard plugins
+    - mkdir -p artifacts/plugins/postgresql
+    - mkdir -p artifacts/plugins/vertica
+    - mkdir -p artifacts/plugins/kafka
+    - mkdir -p artifacts/plugins/delta-lake
+    - mkdir -p artifacts/plugins/iceberg
+    - mkdir -p artifacts/plugins/storage
+
+    # Create directories for custom plugins
+    - mkdir -p artifacts/plugins/random-functions
+    - mkdir -p artifacts/plugins/api
+    - mkdir -p artifacts/plugins/big-sequence
+    - mkdir -p artifacts/plugins/convert-to-western-digits
+    - mkdir -p artifacts/plugins/jwt
+
+    - mkdir -p artifacts/core
+
+    # Copy standard plugins (these have JARs in target/trino-{plugin}-{version}/ subdirectory)
+    - |
+      if [ -d "plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-postgresql/target/trino-postgresql-${TRINO_VERSION}/*.jar artifacts/plugins/postgresql/ || echo "No JARs found for postgresql"
+      else
+        echo "PostgreSQL plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-vertica/target/trino-vertica-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-vertica/target/trino-vertica-${TRINO_VERSION}/*.jar artifacts/plugins/vertica/ || echo "No JARs found for vertica"
+      else
+        echo "Vertica plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-kafka/target/trino-kafka-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-kafka/target/trino-kafka-${TRINO_VERSION}/*.jar artifacts/plugins/kafka/ || echo "No JARs found for kafka"
+      else
+        echo "Kafka plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-delta-lake/target/trino-delta-lake-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-delta-lake/target/trino-delta-lake-${TRINO_VERSION}/*.jar artifacts/plugins/delta-lake/ || echo "No JARs found for delta-lake"
+      else
+        echo "Delta Lake plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-iceberg/target/trino-iceberg-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-iceberg/target/trino-iceberg-${TRINO_VERSION}/*.jar artifacts/plugins/iceberg/ || echo "No JARs found for iceberg"
+      else
+        echo "Iceberg plugin build directory not found"
+      fi
+    - |
+      if [ -d "plugin/trino-storage/target/trino-storage-${TRINO_VERSION}" ]; then
+        cp -r plugin/trino-storage/target/trino-storage-${TRINO_VERSION}/*.jar artifacts/plugins/storage/ || echo "No JARs found for storage"
+      else
+        echo "Storage plugin build directory not found"
+      fi
+
+    # Copy custom plugins (these have JARs directly in target/ directory with specific names)
+    - |
+      echo "=== Processing custom plugins ==="
+
+      # trino-random-functions
+      if [ -f "plugin/trino-random-functions/target/trino-random-functions-1.0.0.jar" ]; then
+        cp plugin/trino-random-functions/target/trino-random-functions-1.0.0.jar artifacts/plugins/random-functions/
+        echo "Custom plugin trino-random-functions copied successfully"
+      else
+        echo "WARNING: trino-random-functions JAR not found"
+      fi
+
+      # trino-api
+      if [ -f "plugin/trino-api/target/trino-api-plugin-1.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-api/target/trino-api-plugin-1.0-SNAPSHOT.jar artifacts/plugins/api/
+        echo "Custom plugin trino-api copied successfully"
+      else
+        echo "WARNING: trino-api JAR not found"
+      fi
+
+      # trino-big-sequence
+      if [ -f "plugin/trino-big-sequence/target/trino-big-sequence-1.0.0.jar" ]; then
+        cp plugin/trino-big-sequence/target/trino-big-sequence-1.0.0.jar artifacts/plugins/big-sequence/
+        echo "Custom plugin trino-big-sequence copied successfully"
+      else
+        echo "WARNING: trino-big-sequence JAR not found"
+      fi
+
+      # trino-convert-to-western-digits
+      if [ -f "plugin/trino-convert-to-western-digits/target/trino-convert-to-western-digits-plugin-1.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-convert-to-western-digits/target/trino-convert-to-western-digits-plugin-1.0-SNAPSHOT.jar artifacts/plugins/convert-to-western-digits/
+        echo "Custom plugin trino-convert-to-western-digits copied successfully"
+      else
+        echo "WARNING: trino-convert-to-western-digits JAR not found"
+      fi
+
+      # trino-jwt
+      if [ -f "plugin/trino-jwt/target/jwt-trino-plugin-1.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-jwt/target/jwt-trino-plugin-1.0-SNAPSHOT.jar artifacts/plugins/jwt/
+        echo "Custom plugin trino-jwt copied successfully"
+      else
+        echo "WARNING: trino-jwt JAR not found"
+      fi
+
+    # Copy core component
+    - |
+      if [ -f "core/trino-main/target/trino-main-${TRINO_VERSION}.jar" ]; then
+        cp core/trino-main/target/trino-main-${TRINO_VERSION}.jar artifacts/core/
+        echo "Core component trino-main copied successfully"
+      else
+        echo "WARNING: trino-main JAR not found"
+      fi
+
+    - echo "=== Build Artifacts Summary ==="
+    - find artifacts -type f -name "*.jar" | sort
+
+    - echo "ARTIFACT_VERSION=$ARTIFACT_VERSION" > build.env
+
+  artifacts:
+    paths:
+      - artifacts/
+    expire_in: 1 day
+    reports:
+      dotenv: build.env
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
+    - when: manual
+
 deploy-to-artifactory-manual:
   stage: deploy
   image: artifactory.exness.io/golden-images/maven:3.9.7-eclipse-temurin-17-jdk
@@ -10,7 +222,15 @@ deploy-to-artifactory-manual:
     - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
       when: manual
   before_script:
-    - *version_setup_feature
+    # Version setup for feature branches
+    - export BUILD_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+      else
+        export ARTIFACT_VERSION="${TRINO_VERSION}-${CI_COMMIT_REF_SLUG}-${BUILD_TIMESTAMP}"
+        echo "Feature branch version: $ARTIFACT_VERSION"
+      fi
     - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
     - apt-get update -q && apt-get install -yq --no-install-recommends wget jq curl
     - echo "=== Starting OIDC Token Exchange ==="
@@ -184,7 +404,7 @@ deploy-to-artifactory-manual:
         fi
       done
 
-    # Deploy custom plugins (similar pattern)
+    # Deploy custom plugins
     - |
       echo "=== Deploying custom plugins ==="
       declare -A CUSTOM_PLUGINS=(
@@ -278,11 +498,36 @@ deploy-to-artifactory-manual:
       echo "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/com/exness/trino/"
       echo "Version: $ARTIFACT_VERSION"
 
-# Apply the same fixes to the auto deployment job
 deploy-to-artifactory-auto:
-  extends: deploy-to-artifactory-manual
+  stage: deploy
+  image: artifactory.exness.io/golden-images/maven:3.9.7-eclipse-temurin-17-jdk
+  id_tokens:
+    JFROG_ID_TOKEN:
+      aud: https://$ARTIFACTORY_URL/
+  dependencies:
+    - build-trino
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      when: on_success
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
   before_script:
-    - *version_setup_main
+    # Version setup for main branch
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        export ARTIFACT_VERSION="${CI_COMMIT_TAG}"
+      else
+        git fetch --tags
+        LAST_TAG=$(git tag -l "${TRINO_VERSION}.*" | sort -V | tail -n1)
+        if [ -z "$LAST_TAG" ]; then
+          export ARTIFACT_VERSION="${TRINO_VERSION}.1"
+        else
+          MINOR_VERSION=$(echo $LAST_TAG | cut -d. -f2)
+          NEXT_MINOR=$((MINOR_VERSION + 1))
+          export ARTIFACT_VERSION="${TRINO_VERSION}.${NEXT_MINOR}"
+        fi
+        echo "Calculated version: $ARTIFACT_VERSION (based on last tag: ${LAST_TAG:-none})"
+      fi
     - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
     - apt-get update -q && apt-get install -yq --no-install-recommends wget jq curl
     - |
@@ -320,8 +565,211 @@ deploy-to-artifactory-auto:
       </settings>
       EOF
     - chmod 600 ~/.m2/settings.xml
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
-      when: on_success
-    - if: '$CI_COMMIT_TAG'
-      when: on_success
+  script:
+    # Reuse the exact same deployment script from manual job
+    - apt-get update -qq && apt-get install -yqq zip
+
+    - |
+      deploy_with_curl() {
+        local GROUP_ID="$1"
+        local ARTIFACT_ID="$2"
+        local VERSION="$3"
+        local FILE="$4"
+        local PACKAGING="$5"
+
+        local GROUP_PATH=$(echo "$GROUP_ID" | tr '.' '/')
+        local BASE_URL="https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated"
+        local ARTIFACT_PATH="${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}"
+
+        echo "Deploying ${ARTIFACT_ID} using curl..."
+
+        curl -f -X PUT \
+          -H "Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+          -T "$FILE" \
+          "${BASE_URL}/${ARTIFACT_PATH}/${ARTIFACT_ID}-${VERSION}.${PACKAGING}"
+
+        if [ $? -eq 0 ]; then
+          echo "Successfully uploaded ${ARTIFACT_ID}-${VERSION}.${PACKAGING}"
+
+          cat > /tmp/temp-pom.xml << POM_EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <project>
+        <modelVersion>4.0.0</modelVersion>
+        <groupId>${GROUP_ID}</groupId>
+        <artifactId>${ARTIFACT_ID}</artifactId>
+        <version>${VERSION}</version>
+        <packaging>${PACKAGING}</packaging>
+      </project>
+      POM_EOF
+
+          curl -f -X PUT \
+            -H "Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+            -T /tmp/temp-pom.xml \
+            "${BASE_URL}/${ARTIFACT_PATH}/${ARTIFACT_ID}-${VERSION}.pom"
+
+          return 0
+        else
+          return 1
+        fi
+      }
+
+    - |
+      check_artifact_exists() {
+        local GROUP_ID="$1"
+        local ARTIFACT_ID="$2"
+        local VERSION="$3"
+        local PACKAGING="$4"
+
+        local GROUP_PATH=$(echo "$GROUP_ID" | tr '.' '/')
+        local URL="https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${VERSION}.${PACKAGING}"
+
+        echo "Checking if artifact exists: $URL"
+
+        if curl -f -s -o /dev/null -w "%{http_code}" \
+             -H "Authorization: Bearer $JFROG_ACCESS_TOKEN" \
+             "$URL" | grep -q "200"; then
+          return 0
+        else
+          return 1
+        fi
+      }
+
+    - |
+      echo "=== Deploying standard plugins ==="
+      for plugin in postgresql vertica kafka delta-lake iceberg storage; do
+        echo "=== Deploying $plugin plugin ==="
+        PLUGIN_DIR="artifacts/plugins/$plugin"
+
+        if [ -d "$PLUGIN_DIR" ] && [ "$(ls -A $PLUGIN_DIR 2>/dev/null)" ]; then
+          if check_artifact_exists "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" "zip"; then
+            echo "WARNING: Artifact already exists. Skipping..."
+            continue
+          fi
+
+          cd "$PLUGIN_DIR"
+          zip -r /tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip *.jar
+          cd -
+
+          cat > /tmp/pom-${plugin}.xml << EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <project>
+        <modelVersion>4.0.0</modelVersion>
+        <groupId>com.exness.trino</groupId>
+        <artifactId>trino-${plugin}-complete</artifactId>
+        <version>${ARTIFACT_VERSION}</version>
+        <packaging>zip</packaging>
+      </project>
+      EOF
+
+          if mvn deploy:deploy-file \
+            -DgroupId=com.exness.trino \
+            -DartifactId=trino-${plugin}-complete \
+            -Dversion=$ARTIFACT_VERSION \
+            -Dpackaging=zip \
+            -Dfile=/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip \
+            -DpomFile=/tmp/pom-${plugin}.xml \
+            -DrepositoryId=exness-artifactory \
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
+            echo "Successfully deployed with Maven"
+          else
+            echo "Maven deploy failed, trying curl..."
+            if deploy_with_curl "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" \
+              "/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip" "zip"; then
+              echo "Successfully deployed with curl"
+            else
+              echo "ERROR: Failed to deploy ${plugin}"
+            fi
+          fi
+        fi
+      done
+
+    - |
+      echo "=== Deploying custom plugins ==="
+      declare -A CUSTOM_PLUGINS=(
+        ["random-functions"]="random-functions"
+        ["api"]="api"
+        ["big-sequence"]="big-sequence"
+        ["convert-to-western-digits"]="convert-to-western-digits"
+        ["jwt"]="jwt"
+      )
+
+      for plugin_dir in "${!CUSTOM_PLUGINS[@]}"; do
+        plugin_name="${CUSTOM_PLUGINS[$plugin_dir]}"
+        echo "=== Deploying custom plugin: trino-${plugin_name} ==="
+        PLUGIN_DIR="artifacts/plugins/$plugin_dir"
+
+        if [ -d "$PLUGIN_DIR" ] && [ "$(ls -A $PLUGIN_DIR 2>/dev/null)" ]; then
+          if check_artifact_exists "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" "zip"; then
+            echo "WARNING: Artifact already exists. Skipping..."
+            continue
+          fi
+
+          cd "$PLUGIN_DIR"
+          zip -r /tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip *.jar
+          cd -
+
+          cat > /tmp/pom-${plugin_name}.xml << EOF
+      <?xml version="1.0" encoding="UTF-8"?>
+      <project>
+        <modelVersion>4.0.0</modelVersion>
+        <groupId>com.exness.trino</groupId>
+        <artifactId>trino-${plugin_name}-complete</artifactId>
+        <version>${ARTIFACT_VERSION}</version>
+        <packaging>zip</packaging>
+      </project>
+      EOF
+
+          if mvn deploy:deploy-file \
+            -DgroupId=com.exness.trino \
+            -DartifactId=trino-${plugin_name}-complete \
+            -Dversion=$ARTIFACT_VERSION \
+            -Dpackaging=zip \
+            -Dfile=/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip \
+            -DpomFile=/tmp/pom-${plugin_name}.xml \
+            -DrepositoryId=exness-artifactory \
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
+            echo "Successfully deployed with Maven"
+          else
+            echo "Maven deploy failed, trying curl..."
+            if deploy_with_curl "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" \
+              "/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip" "zip"; then
+              echo "Successfully deployed with curl"
+            else
+              echo "ERROR: Failed to deploy ${plugin_name}"
+            fi
+          fi
+        fi
+      done
+
+    - |
+      echo "=== Deploying core components ==="
+      if [ -f "artifacts/core/trino-main-${TRINO_VERSION}.jar" ]; then
+        if check_artifact_exists "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" "jar"; then
+          echo "WARNING: Artifact already exists. Skipping..."
+        else
+          if mvn deploy:deploy-file \
+            -DgroupId=com.exness.trino \
+            -DartifactId=trino-main \
+            -Dversion=$ARTIFACT_VERSION \
+            -Dpackaging=jar \
+            -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
+            -DrepositoryId=exness-artifactory \
+            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
+            echo "Successfully deployed with Maven"
+          else
+            echo "Maven deploy failed, trying curl..."
+            if deploy_with_curl "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" \
+              "artifacts/core/trino-main-${TRINO_VERSION}.jar" "jar"; then
+              echo "Successfully deployed with curl"
+            else
+              echo "ERROR: Failed to deploy trino-main"
+            fi
+          fi
+        fi
+      fi
+
+    - |
+      echo "=== Deployment Summary ==="
+      echo "Deployment complete. Check Artifactory at:"
+      echo "https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated/com/exness/trino/"
+      echo "Version: $ARTIFACT_VERSION"
