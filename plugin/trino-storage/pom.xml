@@ -5,12 +5,12 @@
     <parent>
         <groupId>io.airlift</groupId>
         <artifactId>airbase</artifactId>
-        <version>306</version>
+        <version>305</version>
     </parent>
 
     <groupId>org.ebyhr</groupId>
     <artifactId>trino-storage</artifactId>
-    <version>478-SNAPSHOT</version>
+    <version>477-SNAPSHOT</version>
     <packaging>trino-plugin</packaging>
     <description>Trino - Storage Connector</description>
 
@@ -601,7 +601,7 @@
                     <dependency>
                         <groupId>com.github.ferstl</groupId>
                         <artifactId>pedantic-pom-enforcers</artifactId>
-                        <version>2.3.0</version>
+                        <version>2.2.0</version>
                     </dependency>
                 </dependencies>
             </plugin>
