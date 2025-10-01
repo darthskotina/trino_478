@@ -254,7 +254,7 @@ deploy-to-artifactory-manual:
         echo "Token obtained successfully"
         echo "Token length: ${#JFROG_ACCESS_TOKEN} characters"
       fi
-  - mkdir -p ~/.m2
+    - mkdir -p ~/.m2
     - |
       cat > ~/.m2/settings.xml << EOF
       <?xml version="1.0" encoding="UTF-8"?>
