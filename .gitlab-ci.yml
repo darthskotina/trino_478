@@ -218,42 +218,42 @@ deploy-to-artifactory-manual:
   rules:
     - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master" && $CI_COMMIT_TAG == null'
       when: manual
-before_script:
-  - *version_setup_feature
-  - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
-  - apt-get update -q && apt-get install -yq --no-install-recommends wget jq
-  - echo "=== Starting OIDC Token Exchange ==="
-  - echo "ARTIFACTORY_URL= ${ARTIFACTORY_URL}"
-  - echo "GITLAB_USER_LOGIN= ${GITLAB_USER_LOGIN}"
-  - |
-    if [ -n "$JFROG_ID_TOKEN" ]; then
-      echo "JFROG_ID_TOKEN exists"
-    else
-      echo "JFROG_ID_TOKEN is missing!"
-    fi
-  - |
-    JFROG_ACCESS_TOKEN=$(wget --quiet \
-      --header="Content-Type: application/json" \
-      --post-data='{
-        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-        "subject_token": "'$JFROG_ID_TOKEN'",
-        "provider_name": "gitlab-oidc"
-      }' \
-      --output-document - \
-      "https://${ARTIFACTORY_URL}/access/api/v1/oidc/token" | jq -r .access_token)
-  - echo "=== Token Exchange Complete ==="
-  - |
-    if [ -z "$JFROG_ACCESS_TOKEN" ]; then
-      echo "ERROR: Token is empty!"
-      exit 1
-    elif [ "$JFROG_ACCESS_TOKEN" = "null" ]; then
-      echo "ERROR: Token is null!"
-      exit 1
-    else
-      echo "Token obtained successfully"
-      echo "Token length: ${#JFROG_ACCESS_TOKEN} characters"
-    fi
+  before_script:
+    - *version_setup_feature
+    - echo "Deploying version $ARTIFACT_VERSION to Artifactory..."
+    - apt-get update -q && apt-get install -yq --no-install-recommends wget jq
+    - echo "=== Starting OIDC Token Exchange ==="
+    - echo "ARTIFACTORY_URL= ${ARTIFACTORY_URL}"
+    - echo "GITLAB_USER_LOGIN= ${GITLAB_USER_LOGIN}"
+    - |
+      if [ -n "$JFROG_ID_TOKEN" ]; then
+        echo "JFROG_ID_TOKEN exists"
+      else
+        echo "JFROG_ID_TOKEN is missing!"
+      fi
+    - |
+      JFROG_ACCESS_TOKEN=$(wget --quiet \
+        --header="Content-Type: application/json" \
+        --post-data='{
+          "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+          "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+          "subject_token": "'$JFROG_ID_TOKEN'",
+          "provider_name": "gitlab-oidc"
+        }' \
+        --output-document - \
+        "https://${ARTIFACTORY_URL}/access/api/v1/oidc/token" | jq -r .access_token)
+    - echo "=== Token Exchange Complete ==="
+    - |
+      if [ -z "$JFROG_ACCESS_TOKEN" ]; then
+        echo "ERROR: Token is empty!"
+        exit 1
+      elif [ "$JFROG_ACCESS_TOKEN" = "null" ]; then
+        echo "ERROR: Token is null!"
+        exit 1
+      else
+        echo "Token obtained successfully"
+        echo "Token length: ${#JFROG_ACCESS_TOKEN} characters"
+      fi
   - mkdir -p ~/.m2
     - |
       cat > ~/.m2/settings.xml << EOF
