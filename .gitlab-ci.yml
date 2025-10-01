@@ -437,6 +437,13 @@ deploy-to-artifactory-auto:
         }' \
         --output-document - \
         "https://${ARTIFACTORY_URL}/access/api/v1/oidc/token" | jq -r .access_token)
+    - |
+      if [ -z "$JFROG_ACCESS_TOKEN" ] || [ "$JFROG_ACCESS_TOKEN" = "null" ]; then
+        echo "ERROR: Failed to obtain access token from Artifactory"
+        exit 1
+      else
+        echo "Successfully obtained access token"
+      fi
     - mkdir -p ~/.m2
     - |
       cat > ~/.m2/settings.xml << EOF
