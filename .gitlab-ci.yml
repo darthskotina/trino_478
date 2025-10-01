@@ -329,9 +329,9 @@ deploy-to-artifactory-manual:
         echo "Upload test response: $UPLOAD_TEST"
       fi
 
-    - |
-      apt-get update -qq && apt-get install -yqq zip
+    - apt-get update -qq && apt-get install -yqq zip
 
+    - |
       check_artifact_exists() {
         local GROUP_ID="$1"
         local ARTIFACT_ID="$2"
