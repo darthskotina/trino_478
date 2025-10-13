@@ -254,38 +254,10 @@ deploy-to-artifactory-manual:
         echo "Successfully obtained access token"
       fi
 
-    # CRITICAL FIX: Use proper authentication format for JFrog access tokens
-    - mkdir -p ~/.m2
-    - |
-      cat > ~/.m2/settings.xml << EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                http://maven.apache.org/xsd/settings-1.0.0.xsd">
-        <servers>
-          <server>
-            <id>exness-artifactory</id>
-            <username>token</username>
-            <password>$JFROG_ACCESS_TOKEN</password>
-          </server>
-        </servers>
-      </settings>
-      EOF
-    - chmod 600 ~/.m2/settings.xml
-
-    # Test authentication with Maven
-    - |
-      echo "=== Testing Maven Authentication ==="
-      mvn dependency:get \
-        -DremoteRepositories=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated \
-        -DgroupId=junit -DartifactId=junit -Dversion=4.12 \
-        -Dtransitive=false || echo "Test download completed"
-
   script:
     - apt-get update -qq && apt-get install -yqq zip
 
-    # Alternative deployment function using curl if Maven fails
+    # Deployment function using curl
     - |
       deploy_with_curl() {
         local GROUP_ID="$1"
@@ -370,36 +342,12 @@ deploy-to-artifactory-manual:
           zip -r /tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip *.jar
           cd -
 
-          # Try Maven first
-          cat > /tmp/pom-${plugin}.xml << EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <project>
-        <modelVersion>4.0.0</modelVersion>
-        <groupId>com.exness.trino</groupId>
-        <artifactId>trino-${plugin}-complete</artifactId>
-        <version>${ARTIFACT_VERSION}</version>
-        <packaging>zip</packaging>
-      </project>
-      EOF
-
-          if mvn deploy:deploy-file \
-            -DgroupId=com.exness.trino \
-            -DartifactId=trino-${plugin}-complete \
-            -Dversion=$ARTIFACT_VERSION \
-            -Dpackaging=zip \
-            -Dfile=/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip \
-            -DpomFile=/tmp/pom-${plugin}.xml \
-            -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
-            echo "Successfully deployed with Maven"
+          # Direct curl deployment
+          if deploy_with_curl "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" \
+            "/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip" "zip"; then
+            echo "Successfully deployed ${plugin}"
           else
-            echo "Maven deploy failed, trying curl..."
-            if deploy_with_curl "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" \
-              "/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip" "zip"; then
-              echo "Successfully deployed with curl"
-            else
-              echo "ERROR: Failed to deploy ${plugin}"
-            fi
+            echo "ERROR: Failed to deploy ${plugin}"
           fi
         fi
       done
@@ -430,36 +378,12 @@ deploy-to-artifactory-manual:
           zip -r /tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip *.jar
           cd -
 
-          # Use the same Maven-first, curl-fallback approach
-          cat > /tmp/pom-${plugin_name}.xml << EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <project>
-        <modelVersion>4.0.0</modelVersion>
-        <groupId>com.exness.trino</groupId>
-        <artifactId>trino-${plugin_name}-complete</artifactId>
-        <version>${ARTIFACT_VERSION}</version>
-        <packaging>zip</packaging>
-      </project>
-      EOF
-
-          if mvn deploy:deploy-file \
-            -DgroupId=com.exness.trino \
-            -DartifactId=trino-${plugin_name}-complete \
-            -Dversion=$ARTIFACT_VERSION \
-            -Dpackaging=zip \
-            -Dfile=/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip \
-            -DpomFile=/tmp/pom-${plugin_name}.xml \
-            -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
-            echo "Successfully deployed with Maven"
+          # Direct curl deployment
+          if deploy_with_curl "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" \
+            "/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip" "zip"; then
+            echo "Successfully deployed ${plugin_name}"
           else
-            echo "Maven deploy failed, trying curl..."
-            if deploy_with_curl "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" \
-              "/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip" "zip"; then
-              echo "Successfully deployed with curl"
-            else
-              echo "ERROR: Failed to deploy ${plugin_name}"
-            fi
+            echo "ERROR: Failed to deploy ${plugin_name}"
           fi
         fi
       done
@@ -471,23 +395,12 @@ deploy-to-artifactory-manual:
         if check_artifact_exists "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" "jar"; then
           echo "WARNING: Artifact already exists. Skipping..."
         else
-          if mvn deploy:deploy-file \
-            -DgroupId=com.exness.trino \
-            -DartifactId=trino-main \
-            -Dversion=$ARTIFACT_VERSION \
-            -Dpackaging=jar \
-            -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
-            -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
-            echo "Successfully deployed with Maven"
+          # Direct curl deployment
+          if deploy_with_curl "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" \
+            "artifacts/core/trino-main-${TRINO_VERSION}.jar" "jar"; then
+            echo "Successfully deployed trino-main"
           else
-            echo "Maven deploy failed, trying curl..."
-            if deploy_with_curl "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" \
-              "artifacts/core/trino-main-${TRINO_VERSION}.jar" "jar"; then
-              echo "Successfully deployed with curl"
-            else
-              echo "ERROR: Failed to deploy trino-main"
-            fi
+            echo "ERROR: Failed to deploy trino-main"
           fi
         fi
       fi
@@ -546,25 +459,6 @@ deploy-to-artifactory-auto:
         echo "ERROR: Failed to obtain access token from Artifactory"
         exit 1
       fi
-    # CRITICAL FIX: Use "token" as username for JFrog access tokens
-    - mkdir -p ~/.m2
-    - |
-      cat > ~/.m2/settings.xml << EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                http://maven.apache.org/xsd/settings-1.0.0.xsd">
-        <servers>
-          <server>
-            <id>exness-artifactory</id>
-            <username>token</username>
-            <password>$JFROG_ACCESS_TOKEN</password>
-          </server>
-        </servers>
-      </settings>
-      EOF
-    - chmod 600 ~/.m2/settings.xml
   script:
     # Reuse the exact same deployment script from manual job
     - apt-get update -qq && apt-get install -yqq zip
@@ -650,35 +544,12 @@ deploy-to-artifactory-auto:
           zip -r /tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip *.jar
           cd -
 
-          cat > /tmp/pom-${plugin}.xml << EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <project>
-        <modelVersion>4.0.0</modelVersion>
-        <groupId>com.exness.trino</groupId>
-        <artifactId>trino-${plugin}-complete</artifactId>
-        <version>${ARTIFACT_VERSION}</version>
-        <packaging>zip</packaging>
-      </project>
-      EOF
-
-          if mvn deploy:deploy-file \
-            -DgroupId=com.exness.trino \
-            -DartifactId=trino-${plugin}-complete \
-            -Dversion=$ARTIFACT_VERSION \
-            -Dpackaging=zip \
-            -Dfile=/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip \
-            -DpomFile=/tmp/pom-${plugin}.xml \
-            -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
-            echo "Successfully deployed with Maven"
+          # Direct curl deployment
+          if deploy_with_curl "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" \
+            "/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip" "zip"; then
+            echo "Successfully deployed ${plugin}"
           else
-            echo "Maven deploy failed, trying curl..."
-            if deploy_with_curl "com.exness.trino" "trino-${plugin}-complete" "$ARTIFACT_VERSION" \
-              "/tmp/trino-${plugin}-${ARTIFACT_VERSION}.zip" "zip"; then
-              echo "Successfully deployed with curl"
-            else
-              echo "ERROR: Failed to deploy ${plugin}"
-            fi
+            echo "ERROR: Failed to deploy ${plugin}"
           fi
         fi
       done
@@ -708,35 +579,12 @@ deploy-to-artifactory-auto:
           zip -r /tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip *.jar
           cd -
 
-          cat > /tmp/pom-${plugin_name}.xml << EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <project>
-        <modelVersion>4.0.0</modelVersion>
-        <groupId>com.exness.trino</groupId>
-        <artifactId>trino-${plugin_name}-complete</artifactId>
-        <version>${ARTIFACT_VERSION}</version>
-        <packaging>zip</packaging>
-      </project>
-      EOF
-
-          if mvn deploy:deploy-file \
-            -DgroupId=com.exness.trino \
-            -DartifactId=trino-${plugin_name}-complete \
-            -Dversion=$ARTIFACT_VERSION \
-            -Dpackaging=zip \
-            -Dfile=/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip \
-            -DpomFile=/tmp/pom-${plugin_name}.xml \
-            -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
-            echo "Successfully deployed with Maven"
+          # Direct curl deployment
+          if deploy_with_curl "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" \
+            "/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip" "zip"; then
+            echo "Successfully deployed ${plugin_name}"
           else
-            echo "Maven deploy failed, trying curl..."
-            if deploy_with_curl "com.exness.trino" "trino-${plugin_name}-complete" "$ARTIFACT_VERSION" \
-              "/tmp/trino-${plugin_name}-${ARTIFACT_VERSION}.zip" "zip"; then
-              echo "Successfully deployed with curl"
-            else
-              echo "ERROR: Failed to deploy ${plugin_name}"
-            fi
+            echo "ERROR: Failed to deploy ${plugin_name}"
           fi
         fi
       done
@@ -747,23 +595,12 @@ deploy-to-artifactory-auto:
         if check_artifact_exists "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" "jar"; then
           echo "WARNING: Artifact already exists. Skipping..."
         else
-          if mvn deploy:deploy-file \
-            -DgroupId=com.exness.trino \
-            -DartifactId=trino-main \
-            -Dversion=$ARTIFACT_VERSION \
-            -Dpackaging=jar \
-            -Dfile=artifacts/core/trino-main-${TRINO_VERSION}.jar \
-            -DrepositoryId=exness-artifactory \
-            -Durl=https://${ARTIFACTORY_URL}/artifactory/maven-big-data-federated; then
-            echo "Successfully deployed with Maven"
+          # Direct curl deployment
+          if deploy_with_curl "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" \
+            "artifacts/core/trino-main-${TRINO_VERSION}.jar" "jar"; then
+            echo "Successfully deployed trino-main"
           else
-            echo "Maven deploy failed, trying curl..."
-            if deploy_with_curl "com.exness.trino" "trino-main" "$ARTIFACT_VERSION" \
-              "artifacts/core/trino-main-${TRINO_VERSION}.jar" "jar"; then
-              echo "Successfully deployed with curl"
-            else
-              echo "ERROR: Failed to deploy trino-main"
-            fi
+            echo "ERROR: Failed to deploy trino-main"
           fi
         fi
       fi
