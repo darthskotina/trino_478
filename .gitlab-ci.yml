@@ -8,7 +8,6 @@ stages:
   - build
   - deploy
 
-# Define reusable script snippets as hidden jobs
 .version_setup_main:
   script: &version_setup_main
     - |
