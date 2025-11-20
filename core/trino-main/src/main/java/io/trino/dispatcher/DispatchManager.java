@@ -111,7 +111,6 @@ public class DispatchManager
         return sql;
     }
 
-
     @Inject
     public DispatchManager(
             QueryIdGenerator queryIdGenerator,
