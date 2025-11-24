@@ -97,10 +97,18 @@ public class DispatchManager
     private final QueryMonitor queryMonitor;
     private final ScheduledExecutorService statsUpdaterExecutor;
 
-    private static String maskIfCreateCatalog(String sql)
+    private static String maskIfSensFunction(String sql)
     {
         String l = sql.toLowerCase(Locale.ENGLISH);
-        return (l.contains("create") && l.contains("catalog")) ? "create catalog ****" : sql;
+
+        if (l.contains("create") && l.contains("catalog")) {
+            return "create catalog ****";
+        }
+        if (l.contains("call_api") || (l.contains("call") && l.contains("api"))) {
+            return "call api ****";
+        }
+
+        return sql;
     }
 
     @Inject
@@ -250,7 +258,7 @@ public class DispatchManager
             DispatchQuery dispatchQuery = dispatchQueryFactory.createDispatchQuery(
                     session,
                     sessionContext.getTransactionId(),
-                    maskIfCreateCatalog(query),
+                    maskIfSensFunction(query),
                     preparedQuery,
                     slug,
                     selectionContext.getResourceGroupId());
@@ -277,7 +285,7 @@ public class DispatchManager
                         .build();
             }
             Optional<String> preparedSql = Optional.ofNullable(preparedQuery).flatMap(PreparedQuery::getPrepareSql);
-            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, maskIfCreateCatalog(query), preparedSql, Optional.empty(), throwable);
+            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, maskIfSensFunction(query), preparedSql, Optional.empty(), throwable);
             queryCreated(failedDispatchQuery);
             // maintain proper order of calls such that EventListener has access to QueryInfo
             // - add query to tracker
