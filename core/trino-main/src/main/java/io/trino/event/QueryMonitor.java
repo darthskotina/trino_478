@@ -241,6 +241,7 @@ public class QueryMonitor
                         ImmutableList.of(),
                         ImmutableList.of(),
                         ImmutableList.of(),
+                        ImmutableMap.of(),
                         Optional.empty()),
                 createQueryContext(
                         queryInfo.getSession(),
@@ -357,6 +358,7 @@ public class QueryMonitor
                 getDynamicFilterDomainStats(queryInfo),
                 memoize(() -> operatorStats.stream().map(operatorStatsCodec::toJson).toList()),
                 ImmutableList.copyOf(queryInfo.getQueryStats().getOptimizerRulesSummaries()),
+                ImmutableMap.copyOf(queryInfo.getQueryStats().getCatalogMetadataMetrics()),
                 serializedPlanNodeStatsAndCosts);
     }
 
@@ -569,7 +571,7 @@ public class QueryMonitor
 
     private static Optional<TaskInfo> findFailedTask(StagesInfo stages)
     {
-        for (StageInfo stageInfo : stages.getSubStagesDeepPostOrder(stages.getOutputStageId(), true)) {
+        for (StageInfo stageInfo : stages.getSubStagesDeep(stages.getOutputStageId(), true)) {
             Optional<TaskInfo> failedTaskInfo = stageInfo.getTasks().stream()
                     .filter(taskInfo -> taskInfo.taskStatus().getState() == TaskState.FAILED)
                     .findFirst();
@@ -732,7 +734,7 @@ public class QueryMonitor
         DistributionSnapshot snapshot = cpuDistribution.snapshot();
 
         return new StageCpuDistribution(
-                stageInfo.getStageId().getId(),
+                stageInfo.getStageId().id(),
                 stageInfo.getTasks().size(),
                 (long) snapshot.p25(),
                 (long) snapshot.p50(),
@@ -759,7 +761,7 @@ public class QueryMonitor
     {
         return stageInfo.getStageStats().getOutputBufferUtilization()
                 .map(utilization -> new StageOutputBufferUtilization(
-                            stageInfo.getStageId().getId(),
+                            stageInfo.getStageId().id(),
                             stageInfo.getTasks().size(),
                             // scale ratio to percentages
                             utilization.p01() * 100,
@@ -791,7 +793,7 @@ public class QueryMonitor
         if (metrics.getMetrics().isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(new StageOutputBufferMetrics(stageInfo.getStageId().getId(), metrics));
+        return Optional.of(new StageOutputBufferMetrics(stageInfo.getStageId().id(), metrics));
     }
 
     private List<StageTaskStatistics> getStageTaskStatistics(QueryInfo queryInfo)
@@ -855,7 +857,7 @@ public class QueryMonitor
                             distributionSnapshot.count());
                 }));
         return new StageTaskStatistics(
-                stageInfo.getStageId().getId(),
+                stageInfo.getStageId().id(),
                 stageInfo.getTasks().size(),
                 getTasksDistribution(stageInfo, taskInfo -> Optional.of(taskInfo.stats().getTotalCpuTime().toMillis())),
                 getTasksDistribution(stageInfo, taskInfo -> Optional.of(taskInfo.stats().getTotalScheduledTime().toMillis())),

@@ -79,6 +79,7 @@ import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.LanguageFunction;
 import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Privilege;
@@ -181,11 +182,11 @@ public class TracingConnectorMetadata
     }
 
     @Override
-    public void executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
+    public Map<String, Long> executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
     {
         Span span = startSpan("executeTableExecute", tableExecuteHandle);
         try (var _ = scopedSpan(span)) {
-            delegate.executeTableExecute(session, tableExecuteHandle);
+            return delegate.executeTableExecute(session, tableExecuteHandle);
         }
     }
 
@@ -250,6 +251,14 @@ public class TracingConnectorMetadata
         try (var _ = scopedSpan(span)) {
             return delegate.getInfo(session, table);
         }
+    }
+
+    @Override
+    public Metrics getMetrics(ConnectorSession session)
+    {
+        // Do not trace getMetrics as this is expected to be a quick local jvm call,
+        // and adding this span would only obfuscate the trace
+        return delegate.getMetrics(session);
     }
 
     @Override
@@ -575,6 +584,15 @@ public class TracingConnectorMetadata
         Span span = startSpan("getInsertLayout", tableHandle);
         try (var _ = scopedSpan(span)) {
             return delegate.getInsertLayout(session, tableHandle);
+        }
+    }
+
+    @Override
+    public TableStatisticsMetadata getStatisticsCollectionMetadataForWrite(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean tableReplace)
+    {
+        Span span = startSpan("getStatisticsCollectionMetadataForWrite", tableMetadata.getTable());
+        try (var _ = scopedSpan(span)) {
+            return delegate.getStatisticsCollectionMetadataForWrite(session, tableMetadata, tableReplace);
         }
     }
 

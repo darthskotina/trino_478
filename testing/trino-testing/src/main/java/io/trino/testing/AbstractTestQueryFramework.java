@@ -232,7 +232,7 @@ public abstract class AbstractTestQueryFramework
                         List<TaskInfo> taskInfos = taskManager.getAllTaskInfo();
                         for (TaskInfo taskInfo : taskInfos) {
                             TaskId taskId = taskInfo.taskStatus().getTaskId();
-                            QueryId queryId = taskId.getQueryId();
+                            QueryId queryId = taskId.queryId();
                             TaskState taskState = taskInfo.taskStatus().getState();
                             if (!taskState.isDone()) {
                                 try {
@@ -429,6 +429,11 @@ public abstract class AbstractTestQueryFramework
     protected void assertUpdate(Session session, @Language("SQL") String sql, long count, Consumer<Plan> planAssertion)
     {
         QueryAssertions.assertUpdate(queryRunner, session, sql, OptionalLong.of(count), Optional.of(planAssertion));
+    }
+
+    protected void assertUpdate(Session session, @Language("SQL") String sql, Consumer<Plan> planAssertion)
+    {
+        QueryAssertions.assertUpdate(queryRunner, session, sql, OptionalLong.empty(), Optional.of(planAssertion));
     }
 
     protected void assertQuerySucceeds(@Language("SQL") String sql)

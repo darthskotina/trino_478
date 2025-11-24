@@ -31,7 +31,6 @@ import io.trino.cost.PlanCostEstimate;
 import io.trino.cost.PlanNodeStatsAndCostSummary;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.cost.StatsAndCosts;
-import io.trino.execution.DistributionSnapshot;
 import io.trino.execution.QueryStats;
 import io.trino.execution.StageInfo;
 import io.trino.execution.StageStats;
@@ -42,6 +41,7 @@ import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TableHandle;
+import io.trino.plugin.base.metrics.DistributionSnapshot;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.expression.FunctionName;
 import io.trino.spi.function.CatalogSchemaFunctionName;
@@ -428,7 +428,7 @@ public class PlanPrinter
             Anonymizer anonymizer,
             NodeVersion version)
     {
-        return textDistributedPlan(stages.getStages(), queryStats, valuePrinter, verbose, anonymizer, version);
+        return textDistributedPlan(stages.getSubStagesDeepTopological(stages.getOutputStageId(), true), queryStats, valuePrinter, verbose, anonymizer, version);
     }
 
     public static String textDistributedPlan(
@@ -2007,7 +2007,7 @@ public class PlanPrinter
 
         private void printAssignments(NodeRepresentation nodeOutput, Assignments assignments)
         {
-            for (Entry<Symbol, Expression> entry : assignments.getMap().entrySet()) {
+            for (Entry<Symbol, Expression> entry : assignments.assignments().entrySet()) {
                 if (entry.getValue() instanceof Reference && ((Reference) entry.getValue()).name().equals(entry.getKey().name())) {
                     // skip identity assignments
                     continue;

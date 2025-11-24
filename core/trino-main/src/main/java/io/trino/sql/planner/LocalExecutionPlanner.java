@@ -772,7 +772,7 @@ public class LocalExecutionPlanner
 
         public StageId getStageId()
         {
-            return taskContext.getTaskId().getStageId();
+            return taskContext.getTaskId().stageId();
         }
 
         public TaskId getTaskId()
@@ -1494,7 +1494,7 @@ public class LocalExecutionPlanner
                 measureComputationsAggregationArguments.addAll(valueAccessors.getAggregationArguments());
 
                 // build measure computation
-                measuresBuilder.add(new MeasureComputationSupplier(pageProjectionSupplier, valueAccessors.getValueAccessors(), measure.getType(), labelNames, connectorSession));
+                measuresBuilder.add(new MeasureComputationSupplier(pageProjectionSupplier, valueAccessors.getValueAccessors(), labelNames, connectorSession));
             }
             List<MeasureComputationSupplier> measureComputations = measuresBuilder.build();
 
@@ -3297,7 +3297,7 @@ public class LocalExecutionPlanner
 
         private static Set<DynamicFilterId> getCoordinatorDynamicFilters(Set<DynamicFilterId> dynamicFilters, PlanNode node, TaskId taskId)
         {
-            if (!isBuildSideReplicated(node) || taskId.getPartitionId() == 0) {
+            if (!isBuildSideReplicated(node) || taskId.partitionId() == 0) {
                 // replicated dynamic filters are collected by single stage task only
                 return dynamicFilters;
             }
@@ -3476,7 +3476,8 @@ public class LocalExecutionPlanner
                             node.getId(),
                             metadata,
                             session,
-                            node.getExecuteHandle());
+                            node.getExecuteHandle(),
+                            getSymbolTypes(node.getOutputSymbols()));
 
             return new PhysicalOperation(operatorFactory, makeLayout(node));
         }

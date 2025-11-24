@@ -36,9 +36,7 @@ import java.util.OptionalDouble;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.units.DataSize.Unit.BYTE;
-import static io.trino.execution.DistributionSnapshot.pruneMetrics;
 import static io.trino.execution.StageState.RUNNING;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
@@ -102,7 +100,7 @@ public class StageStats
     private final Duration failedInputBlockedTime;
 
     private final DataSize bufferedDataSize;
-    private final Optional<io.trino.execution.DistributionSnapshot> outputBufferUtilization;
+    private final Optional<io.trino.plugin.base.metrics.DistributionSnapshot> outputBufferUtilization;
     private final DataSize outputDataSize;
     private final DataSize failedOutputDataSize;
     private final long outputPositions;
@@ -176,7 +174,7 @@ public class StageStats
             @JsonProperty("failedInputBlockedTime") Duration failedInputBlockedTime,
 
             @JsonProperty("bufferedDataSize") DataSize bufferedDataSize,
-            @JsonProperty("outputBufferUtilization") Optional<io.trino.execution.DistributionSnapshot> outputBufferUtilization,
+            @JsonProperty("outputBufferUtilization") Optional<io.trino.plugin.base.metrics.DistributionSnapshot> outputBufferUtilization,
             @JsonProperty("outputDataSize") DataSize outputDataSize,
             @JsonProperty("failedOutputDataSize") DataSize failedOutputDataSize,
             @JsonProperty("outputPositions") long outputPositions,
@@ -277,9 +275,7 @@ public class StageStats
         this.failedPhysicalWrittenDataSize = requireNonNull(failedPhysicalWrittenDataSize, "failedPhysicalWrittenDataSize is null");
 
         this.gcInfo = requireNonNull(gcInfo, "gcInfo is null");
-
-        requireNonNull(operatorSummaries, "operatorSummaries is null");
-        this.operatorSummaries = operatorSummaries.stream().map(OperatorStats::pruneDigests).collect(toImmutableList());
+        this.operatorSummaries = ImmutableList.copyOf(operatorSummaries);
     }
 
     @JsonProperty
@@ -547,7 +543,7 @@ public class StageStats
     }
 
     @JsonProperty
-    public Optional<io.trino.execution.DistributionSnapshot> getOutputBufferUtilization()
+    public Optional<io.trino.plugin.base.metrics.DistributionSnapshot> getOutputBufferUtilization()
     {
         return outputBufferUtilization;
     }
@@ -659,69 +655,6 @@ public class StageStats
                 blockedReasons,
                 progressPercentage,
                 runningPercentage);
-    }
-
-    public StageStats pruneDigests()
-    {
-        return new StageStats(
-                schedulingComplete,
-                getSplitDistribution,
-                splitSourceMetrics,
-                totalTasks,
-                runningTasks,
-                completedTasks,
-                failedTasks,
-                totalDrivers,
-                queuedDrivers,
-                runningDrivers,
-                blockedDrivers,
-                completedDrivers,
-                cumulativeUserMemory,
-                failedCumulativeUserMemory,
-                userMemoryReservation,
-                revocableMemoryReservation,
-                totalMemoryReservation,
-                peakUserMemoryReservation,
-                peakRevocableMemoryReservation,
-                spilledDataSize,
-                totalScheduledTime,
-                failedScheduledTime,
-                totalCpuTime,
-                failedCpuTime,
-                totalBlockedTime,
-                fullyBlocked,
-                blockedReasons,
-                physicalInputDataSize,
-                failedPhysicalInputDataSize,
-                physicalInputPositions,
-                failedPhysicalInputPositions,
-                physicalInputReadTime,
-                failedPhysicalInputReadTime,
-                internalNetworkInputDataSize,
-                failedInternalNetworkInputDataSize,
-                internalNetworkInputPositions,
-                failedInternalNetworkInputPositions,
-                processedInputDataSize,
-                failedProcessedInputDataSize,
-                processedInputPositions,
-                failedProcessedInputPositions,
-                inputBlockedTime,
-                failedInputBlockedTime,
-                bufferedDataSize,
-                outputBufferUtilization,
-                outputDataSize,
-                failedOutputDataSize,
-                outputPositions,
-                failedOutputPositions,
-                pruneMetrics(outputBufferMetrics),
-                outputBlockedTime,
-                failedOutputBlockedTime,
-                physicalWrittenDataSize,
-                failedPhysicalWrittenDataSize,
-                gcInfo,
-                operatorSummaries.stream()
-                        .map(OperatorStats::pruneDigests)
-                        .collect(toImmutableList()));
     }
 
     public static StageStats createInitial()

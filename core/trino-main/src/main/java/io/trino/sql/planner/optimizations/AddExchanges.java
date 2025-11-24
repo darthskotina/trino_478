@@ -747,7 +747,15 @@ public class AddExchanges
         {
             // Disable scale writers for partitioned data in case of Optimize since it can lead to small files and
             // not deterministic wrt to user provided min file size configuration.
-            boolean scaleWriters = node.getPartitioningScheme().isEmpty() && isScaleWriters(session);
+            boolean scaleWriters;
+            if (node.getPartitioningScheme().isPresent()) {
+                // Prefer partitioning by the execute node's partitioning scheme to attempt partitioning pushdown into the connector table scan
+                preferredProperties = PreferredProperties.partitioned(node.getPartitioningScheme().get().getPartitioning());
+                scaleWriters = false;
+            }
+            else {
+                scaleWriters = isScaleWriters(session);
+            }
             return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), preferredProperties, node.getTarget(), scaleWriters);
         }
 
@@ -866,12 +874,8 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitExplainAnalyze(ExplainAnalyzeNode node, PreferredProperties preferredProperties)
         {
-            PlanWithProperties child = planChild(node, PreferredProperties.any());
-
-            // if the child is already a gathering exchange, don't add another
-            if ((child.getNode() instanceof ExchangeNode) && ((ExchangeNode) child.getNode()).getType() == ExchangeNode.Type.GATHER) {
-                return rebaseAndDeriveProperties(node, child);
-            }
+            // Same PreferredProperties as OutputNode
+            PlanWithProperties child = planChild(node, PreferredProperties.undistributed());
 
             // Always add an exchange because ExplainAnalyze should be in its own stage
             child = withDerivedProperties(
@@ -1530,7 +1534,7 @@ public class AddExchanges
     private static Map<Symbol, Symbol> computeIdentityTranslations(Assignments assignments)
     {
         Map<Symbol, Symbol> outputToInput = new HashMap<>();
-        for (Map.Entry<Symbol, Expression> assignment : assignments.getMap().entrySet()) {
+        for (Map.Entry<Symbol, Expression> assignment : assignments.assignments().entrySet()) {
             if (assignment.getValue() instanceof Reference) {
                 outputToInput.put(assignment.getKey(), Symbol.from(assignment.getValue()));
             }

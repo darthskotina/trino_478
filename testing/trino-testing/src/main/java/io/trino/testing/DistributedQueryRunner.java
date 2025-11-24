@@ -30,6 +30,7 @@ import io.trino.Session;
 import io.trino.Session.SessionBuilder;
 import io.trino.client.ClientSession;
 import io.trino.client.StatementClient;
+import io.trino.connector.ConnectorServicesProvider;
 import io.trino.connector.CoordinatorDynamicCatalogManager;
 import io.trino.cost.StatsCalculator;
 import io.trino.execution.FailureInjector.InjectedFailureType;
@@ -297,7 +298,7 @@ public final class DistributedQueryRunner
     private static void setupLogging()
     {
         Logging logging = Logging.initialize();
-        logging.setLevel("Bootstrap", WARN);
+        logging.setLevel("io.trino.bootstrap", WARN);
         logging.setLevel("org.glassfish", ERROR);
         logging.setLevel("org.eclipse.jetty.server", WARN);
         logging.setLevel("org.hibernate.validator.internal.util.Version", WARN);
@@ -997,6 +998,7 @@ public final class DistributedQueryRunner
                 closeAllSuppress(e, queryRunner);
                 throw e;
             }
+            queryRunner.getCoordinator().getInstance(Key.get(ConnectorServicesProvider.class)).loadInitialCatalogs();
 
             return queryRunner;
         }
