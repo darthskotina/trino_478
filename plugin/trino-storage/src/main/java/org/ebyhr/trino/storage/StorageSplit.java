@@ -71,15 +71,6 @@ public class StorageSplit
     }
 
     @Override
-    public Map<String, String> getSplitInfo()
-    {
-        return ImmutableMap.<String, String>builder()
-                .put("mode", mode.name())
-                .put("schemaName", schemaName)
-                .put("tableName", tableName)
-                .buildOrThrow();
-    }
-
     public long getRetainedSizeInBytes()
     {
         return INSTANCE_SIZE
