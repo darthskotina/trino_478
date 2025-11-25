@@ -1,7 +1,4 @@
 <settings>
-    <pluginGroups>
-        <pluginGroup>eu.maveniverse.maven.plugins</pluginGroup>
-    </pluginGroups>
     <servers>
         <server>
             <id>sonatype-central-portal</id>
