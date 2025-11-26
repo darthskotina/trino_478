@@ -2,7 +2,7 @@ variables:
   ARTIFACTORY_URL: artifactory.exness.io
   MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
   MAVEN_OPTS: "-Xmx6g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
-  TRINO_VERSION: "477"  # Base Trino version
+  TRINO_VERSION: "478"  # Base Trino version
 
 stages:
   - build
