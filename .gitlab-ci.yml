@@ -174,8 +174,8 @@ build-trino:
       fi
 
       # trino-encrypt-udfs
-      if [ -f "plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-plugin-1.0-SNAPSHOT.jar" ]; then
-        cp plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-plugin-1.0-SNAPSHOT.jar artifacts/plugins/trino-encrypt-udfs/
+      if [ -f "plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-1.0.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-1.0.0-SNAPSHOT.jar artifacts/plugins/trino-encrypt-udfs/
         echo "Custom plugin trino-encrypt-udfs copied successfully"
       else
         echo "WARNING: trino-encrypt-udfs JAR not found"
