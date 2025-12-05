@@ -29,6 +29,7 @@ import io.trino.operator.BlockedReason;
 import io.trino.operator.OperatorStats;
 import io.trino.operator.PipelineStats;
 import io.trino.operator.TaskStats;
+import io.trino.plugin.base.metrics.DistributionSnapshot;
 import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.spi.eventlistener.StageGcStatistics;
 import io.trino.spi.metrics.Metrics;
@@ -121,7 +122,7 @@ public class StageStateMachine
 
         stageSpan = tracer.spanBuilder("stage")
                 .setParent(Context.current().with(schedulerSpan))
-                .setAttribute(TrinoAttributes.QUERY_ID, stageId.getQueryId().toString())
+                .setAttribute(TrinoAttributes.QUERY_ID, stageId.queryId().toString())
                 .setAttribute(TrinoAttributes.STAGE_ID, stageId.toString())
                 .startSpan();
 
@@ -243,11 +244,15 @@ public class StageStateMachine
 
     public void updateMemoryUsage(long deltaUserMemoryInBytes, long deltaRevocableMemoryInBytes, long deltaTotalMemoryInBytes)
     {
-        currentUserMemory.addAndGet(deltaUserMemoryInBytes);
-        currentRevocableMemory.addAndGet(deltaRevocableMemoryInBytes);
+        long currentUserMemory = this.currentUserMemory.addAndGet(deltaUserMemoryInBytes);
+        long currentRevocableMemory = this.currentRevocableMemory.addAndGet(deltaRevocableMemoryInBytes);
         currentTotalMemory.addAndGet(deltaTotalMemoryInBytes);
-        peakUserMemory.updateAndGet(currentPeakValue -> max(currentUserMemory.get(), currentPeakValue));
-        peakRevocableMemory.updateAndGet(currentPeakValue -> max(currentRevocableMemory.get(), currentPeakValue));
+        if (currentUserMemory > peakUserMemory.get()) {
+            peakUserMemory.accumulateAndGet(currentUserMemory, Math::max);
+        }
+        if (currentRevocableMemory > peakRevocableMemory.get()) {
+            peakRevocableMemory.accumulateAndGet(currentRevocableMemory, Math::max);
+        }
     }
 
     public BasicStageStats getBasicStageStats(Supplier<Iterable<TaskInfo>> taskInfosSupplier)
@@ -643,7 +648,7 @@ public class StageStateMachine
                 succinctDuration(inputBlockedTime, NANOSECONDS),
                 succinctDuration(failedInputBlockedTime, NANOSECONDS),
                 succinctBytes(bufferedDataSize),
-                TDigestHistogram.merge(bufferUtilizationHistograms.build()).map(DistributionSnapshot::new),
+                TDigestHistogram.merge(bufferUtilizationHistograms.build()).map(DistributionSnapshot::fromDistribution),
                 succinctBytes(outputDataSize),
                 succinctBytes(failedOutputDataSize),
                 outputPositions,
@@ -655,7 +660,7 @@ public class StageStateMachine
                 succinctBytes(failedPhysicalWrittenDataSize),
 
                 new StageGcStatistics(
-                        stageId.getId(),
+                        stageId.id(),
                         totalTasks,
                         fullGcTaskCount,
                         minFullGcSec,

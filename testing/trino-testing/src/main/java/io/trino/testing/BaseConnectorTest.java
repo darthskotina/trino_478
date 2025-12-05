@@ -30,9 +30,13 @@ import io.trino.execution.QueryManager;
 import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.plugin.base.metrics.DistributionSnapshot;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.server.BasicQueryInfo;
+import io.trino.spi.QueryId;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.MaterializedViewFreshness;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.security.Identity;
 import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.Plan;
@@ -61,6 +65,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
@@ -3560,8 +3565,7 @@ public abstract class BaseConnectorTest
         assertQueryFails("CREATE TABLE " + tableName + " (a bad_type)", ".* Unknown type 'bad_type' for column 'a'");
         assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) revert to longer name when Oracle version is updated
-        tableName = "test_cr_not_exists_" + randomNameSuffix();
+        tableName = "test_create_table_not_exists_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " (a bigint, b varchar(50), c double)");
         assertThat(getQueryRunner().tableExists(getSession(), tableName)).isTrue();
         assertTableColumnNames(tableName, "a", "b", "c");
@@ -3863,7 +3867,7 @@ public abstract class BaseConnectorTest
     {
         skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE));
 
-        String tableName = "test_long_column" + randomNameSuffix();
+        String tableNameWithValidColumnLength = "test_long_column" + randomNameSuffix();
         String baseColumnName = "col";
 
         int maxLength = maxColumnNameLength()
@@ -3871,18 +3875,19 @@ public abstract class BaseConnectorTest
                 .orElse(65536 + 5);
 
         String validColumnName = baseColumnName + "z".repeat(maxLength - baseColumnName.length());
-        assertUpdate("CREATE TABLE " + tableName + " (" + validColumnName + " bigint)");
-        assertThat(columnExists(tableName, validColumnName)).isTrue();
-        assertUpdate("DROP TABLE " + tableName);
+        assertUpdate("CREATE TABLE " + tableNameWithValidColumnLength + " (" + validColumnName + " bigint)");
+        assertThat(columnExists(tableNameWithValidColumnLength, validColumnName)).isTrue();
+        assertUpdate("DROP TABLE " + tableNameWithValidColumnLength);
 
         if (maxColumnNameLength().isEmpty()) {
             return;
         }
 
+        String tableNameWithInvalidColumnLength = "test_long_column" + randomNameSuffix();
         String invalidColumnName = validColumnName + "z";
-        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + tableName + " (" + invalidColumnName + " bigint)"))
+        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + tableNameWithInvalidColumnLength + " (" + invalidColumnName + " bigint)"))
                 .satisfies(this::verifyColumnNameLengthFailurePermissible);
-        assertThat(getQueryRunner().tableExists(getSession(), tableName)).isFalse();
+        assertThat(getQueryRunner().tableExists(getSession(), tableNameWithInvalidColumnLength)).isFalse();
     }
 
     // TODO: Add test for CREATE TABLE AS SELECT with long column name
@@ -4440,8 +4445,7 @@ public abstract class BaseConnectorTest
     {
         String nameInSql = toColumnNameInSql(columnName, delimited);
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = newTrinoTable("test_comment_column", "(" + nameInSql + " integer)")) {
+        try (TestTable table = newTrinoTable("test_comment_column_name", "(" + nameInSql + " integer)")) {
             assertUpdate("COMMENT ON COLUMN " + table.getName() + "." + nameInSql + " IS 'test comment'");
             assertThat(getColumnComment(table.getName(), columnName.replace("'", "''").toLowerCase(ENGLISH))).isEqualTo("test comment");
         }
@@ -4910,8 +4914,7 @@ public abstract class BaseConnectorTest
     {
         skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = createTestTableForWrites("test_delete_complex_", "AS SELECT * FROM nation", "nationkey")) {
+        try (TestTable table = createTestTableForWrites("test_delete_with_complex_predicate_", "AS SELECT * FROM nation", "nationkey")) {
             // delete half the table, then delete the rest
             assertUpdate("DELETE FROM " + table.getName() + " WHERE nationkey % 2 = 0", "SELECT count(*) FROM nation WHERE nationkey % 2 = 0");
             assertQuery("SELECT * FROM " + table.getName(), "SELECT * FROM nation WHERE nationkey % 2 <> 0");
@@ -4929,8 +4932,7 @@ public abstract class BaseConnectorTest
         // TODO (https://github.com/trinodb/trino/issues/13210) Migrate these tests to AbstractTestEngineOnlyQueries
         skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = createTestTableForWrites("test_delete_subquery", "AS SELECT * FROM nation", "nationkey")) {
+        try (TestTable table = createTestTableForWrites("test_delete_with_subquery", "AS SELECT * FROM nation", "nationkey")) {
             // delete using a subquery
             assertUpdate("DELETE FROM " + table.getName() + " WHERE regionkey IN (SELECT regionkey FROM region WHERE name LIKE 'A%')", 15);
             assertQuery(
@@ -4938,8 +4940,7 @@ public abstract class BaseConnectorTest
                     "SELECT * FROM nation WHERE regionkey IN (SELECT regionkey FROM region WHERE name NOT LIKE 'A%')");
         }
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = createTestTableForWrites("test_delete_subquery", "AS SELECT * FROM orders", "orderkey")) {
+        try (TestTable table = createTestTableForWrites("test_delete_with_subquery", "AS SELECT * FROM orders", "orderkey")) {
             // delete using a scalar and EXISTS subquery
             assertUpdate("DELETE FROM " + table.getName() + " WHERE orderkey = (SELECT orderkey FROM orders ORDER BY orderkey LIMIT 1)", 1);
             assertUpdate("DELETE FROM " + table.getName() + " WHERE orderkey = (SELECT orderkey FROM orders WHERE false)", 0);
@@ -4992,8 +4993,7 @@ public abstract class BaseConnectorTest
     {
         skipTestUnless(hasBehavior(SUPPORTS_DELETE));
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = createTestTableForWrites("test_delete_semijoin", "AS SELECT * FROM nation", "nationkey")) {
+        try (TestTable table = createTestTableForWrites("test_delete_with_semijoin", "AS SELECT * FROM nation", "nationkey")) {
             // delete with multiple SemiJoin
             assertUpdate(
                     "DELETE FROM " + table.getName() + " " +
@@ -5007,8 +5007,7 @@ public abstract class BaseConnectorTest
                             "  OR regionkey IN (SELECT regionkey FROM region WHERE length(comment) >= 50)");
         }
 
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = createTestTableForWrites("test_delete_semijoin", "AS SELECT * FROM orders", "orderkey")) {
+        try (TestTable table = createTestTableForWrites("test_delete_with_semijoin", "AS SELECT * FROM orders", "orderkey")) {
             // delete with SemiJoin null handling
             assertUpdate(
                     "DELETE FROM " + table.getName() + "\n" +
@@ -5076,8 +5075,7 @@ public abstract class BaseConnectorTest
     public void testRowLevelDelete()
     {
         skipTestUnless(hasBehavior(SUPPORTS_CREATE_TABLE_WITH_DATA) && hasBehavior(SUPPORTS_ROW_LEVEL_DELETE));
-        // TODO (https://github.com/trinodb/trino/issues/5901) Use longer table name once Oracle version is updated
-        try (TestTable table = newTrinoTable("test_row_delete", "AS SELECT * FROM region")) {
+        try (TestTable table = newTrinoTable("test_row_level_delete", "AS SELECT * FROM region")) {
             assertUpdate("DELETE FROM " + table.getName() + " WHERE regionkey = 2", 1);
             assertQuery("SELECT count(*) FROM " + table.getName(), "VALUES 4");
         }
@@ -7479,6 +7477,36 @@ public abstract class BaseConnectorTest
                         formattedPlan));
             }
         };
+    }
+
+    protected Map<String, Metrics> getCatalogMetadataMetrics(QueryId queryId)
+    {
+        try {
+            return getDistributedQueryRunner().getCoordinator()
+                    .getQueryManager()
+                    .getFullQueryInfo(queryId)
+                    .getQueryStats()
+                    .getCatalogMetadataMetrics();
+        }
+        catch (NoSuchElementException e) {
+            throw new RuntimeException("Couldn't find operator summary, probably due to query statistic collection error", e);
+        }
+    }
+
+    protected static void assertDistributionMetricExists(Map<String, Metrics> metrics, String catalog, String metricKey)
+    {
+        assertThat(metrics).containsKey(catalog);
+        assertThat(metrics.get(catalog).getMetrics()).isNotEmpty();
+        assertThat(metrics.get(catalog).getMetrics()).containsKey(metricKey);
+        assertThat(((DistributionSnapshot) metrics.get(catalog).getMetrics().get(metricKey)).total()).isGreaterThan(0);
+    }
+
+    protected static void assertCountMetricExists(Map<String, Metrics> metrics, String catalog, String metricKey)
+    {
+        assertThat(metrics).containsKey(catalog);
+        assertThat(metrics.get(catalog).getMetrics()).isNotEmpty();
+        assertThat(metrics.get(catalog).getMetrics()).containsKey(metricKey);
+        assertThat(((LongCount) metrics.get(catalog).getMetrics().get(metricKey)).getTotal()).isGreaterThan(0);
     }
 
     protected void withMockTableListing(String forSchema, Function<ConnectorSession, List<String>> listing, Runnable closure)

@@ -217,6 +217,15 @@ implementation is used:
   -  Enable [sorted writing](iceberg-sorted-files) to tables with a specified sort order. Equivalent
      session property is `sorted_writing_enabled`.
   -  `true` 
+* - `iceberg.sorted-writing.local-staging-path`
+  -  A local directory that Trino can use for staging writes to sorted tables.
+     The `${USER}` placeholder can be used to use a different
+     location for each user. When this property is not configured, the target 
+     storage will be used for staging while writing to sorted tables which can
+     be inefficient when writing to object stores like S3. When 
+     `fs.hadoop.enabled` is not enabled, using this feature requires setup of 
+     [local file system](/object-storage/file-system-local)
+  -  
 * - `iceberg.allowed-extra-properties`
   -  List of extra properties that are allowed to be set on Iceberg tables.
      Use `*` to allow all properties.
@@ -907,11 +916,38 @@ time is recommended to keep size of a table's data directory under control.
 ALTER TABLE test_table EXECUTE remove_orphan_files(retention_threshold => '7d');
 ```
 
+```text
+        metric_name         | metric_value
+----------------------------+--------------
+ processed_manifests_count  |            2
+ active_files_count         |           98
+ scanned_files_count        |           97
+ deleted_files_count        |            0
+```
+
 The value for `retention_threshold` must be higher than or equal to
 `iceberg.remove-orphan-files.min-retention` in the catalog otherwise the
 procedure fails with a similar message: `Retention specified (1.00d) is shorter
 than the minimum retention configured in the system (7.00d)`. The default value
 for this property is `7d`.
+
+The output of the query has the following metrics:
+
+:::{list-table} Output
+:widths: 40, 60
+:header-rows: 1
+
+* - Property name
+  - Description
+* - `processed_manifests_count`
+  - The count of manifest files read by remove_orphan_files.
+* - `active_files_count`
+  - The count of files belonging to snapshots that have not been expired.
+* - `scanned_files_count`
+  - The count of files scanned from the file system.
+* - `deleted_files_count`
+  - The count of files deleted by remove_orphan_files.
+:::
 
 (drop-extended-stats)=
 ##### drop_extended_stats
@@ -2145,7 +2181,8 @@ enabled, metadata caching in coordinator memory is deactivated.
 
 Additionally, you can use the following catalog configuration properties:
 
-:::{list-table} Memory metadata caching configuration properties :widths: 25, 75
+:::{list-table} Memory metadata caching configuration properties
+:widths: 25, 75
 :header-rows: 1
 
 * - Property
@@ -2160,4 +2197,4 @@ Additionally, you can use the following catalog configuration properties:
     Defaults to `200MB`.
 * - `fs.memory-cache.max-content-length`
   - The maximum file size that can be cached. Defaults to `15MB`.
-  :::
+ :::

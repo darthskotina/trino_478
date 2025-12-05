@@ -29,6 +29,7 @@ import io.airlift.units.Duration;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
+import io.trino.NotInTransactionException;
 import io.trino.Session;
 import io.trino.client.NodeVersion;
 import io.trino.exchange.ExchangeInput;
@@ -36,6 +37,7 @@ import io.trino.execution.QueryExecution.QueryOutputInfo;
 import io.trino.execution.StateMachine.StateChangeListener;
 import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
+import io.trino.metadata.CatalogInfo;
 import io.trino.metadata.Metadata;
 import io.trino.operator.BlockedReason;
 import io.trino.operator.OperatorStats;
@@ -182,6 +184,7 @@ public class QueryStateMachine
     private final AtomicReference<Optional<Output>> output = new AtomicReference<>(Optional.empty());
     private final AtomicReference<List<TableInfo>> referencedTables = new AtomicReference<>(ImmutableList.of());
     private final AtomicReference<List<RoutineInfo>> routines = new AtomicReference<>(ImmutableList.of());
+    private final AtomicReference<Map<String, Metrics>> catalogMetadataMetrics = new AtomicReference<>(ImmutableMap.of());
     private final StateMachine<Optional<QueryInfo>> finalQueryInfo;
 
     private final WarningCollector warningCollector;
@@ -386,6 +389,38 @@ public class QueryStateMachine
         return queryStateMachine;
     }
 
+    private void collectCatalogMetadataMetrics()
+    {
+        try {
+            if (session.getTransactionId().filter(transactionManager::transactionExists).isEmpty()) {
+                // The metrics collection depends on active transaction as the metrics
+                // are stored in the transactional ConnectorMetadata, but the collection can be
+                // run after the query has failed e.g., via cancel.
+                return;
+            }
+
+            ImmutableMap.Builder<String, Metrics> catalogMetadataMetrics = ImmutableMap.builder();
+            List<CatalogInfo> activeCatalogs = metadata.listActiveCatalogs(session);
+            for (CatalogInfo activeCatalog : activeCatalogs) {
+                Metrics metrics = metadata.getMetrics(session, activeCatalog.catalogName());
+                if (!metrics.getMetrics().isEmpty()) {
+                    catalogMetadataMetrics.put(activeCatalog.catalogName(), metrics);
+                }
+            }
+
+            this.catalogMetadataMetrics.set(catalogMetadataMetrics.buildOrThrow());
+        }
+        catch (NotInTransactionException e) {
+            // Ignore, The metrics collection depends on an active transaction and should be skipped
+            // if there is no one running.
+            // The exception can be thrown even though there is a check for transaction at the top of the method, because
+            // the transaction can be committed or aborted concurrently, after the check is done.
+        }
+        catch (RuntimeException e) {
+            QUERY_STATE_LOG.error(e, "Error collecting query catalog metadata metrics: %s", queryId);
+        }
+    }
+
     public QueryId getQueryId()
     {
         return queryId;
@@ -449,15 +484,27 @@ public class QueryStateMachine
             long taskRevocableMemoryInBytes,
             long taskTotalMemoryInBytes)
     {
-        currentUserMemory.addAndGet(deltaUserMemoryInBytes);
-        currentRevocableMemory.addAndGet(deltaRevocableMemoryInBytes);
-        currentTotalMemory.addAndGet(deltaTotalMemoryInBytes);
-        peakUserMemory.updateAndGet(currentPeakValue -> Math.max(currentUserMemory.get(), currentPeakValue));
-        peakRevocableMemory.updateAndGet(currentPeakValue -> Math.max(currentRevocableMemory.get(), currentPeakValue));
-        peakTotalMemory.updateAndGet(currentPeakValue -> Math.max(currentTotalMemory.get(), currentPeakValue));
-        peakTaskUserMemory.accumulateAndGet(taskUserMemoryInBytes, Math::max);
-        peakTaskRevocableMemory.accumulateAndGet(taskRevocableMemoryInBytes, Math::max);
-        peakTaskTotalMemory.accumulateAndGet(taskTotalMemoryInBytes, Math::max);
+        long currentUserMemory = this.currentUserMemory.addAndGet(deltaUserMemoryInBytes);
+        long currentRevocableMemory = this.currentRevocableMemory.addAndGet(deltaRevocableMemoryInBytes);
+        long currentTotalMemory = this.currentTotalMemory.addAndGet(deltaTotalMemoryInBytes);
+        if (currentUserMemory > peakUserMemory.get()) {
+            peakUserMemory.accumulateAndGet(currentUserMemory, Math::max);
+        }
+        if (currentRevocableMemory > peakRevocableMemory.get()) {
+            peakRevocableMemory.accumulateAndGet(currentRevocableMemory, Math::max);
+        }
+        if (currentTotalMemory > peakTotalMemory.get()) {
+            peakTotalMemory.accumulateAndGet(currentTotalMemory, Math::max);
+        }
+        if (taskUserMemoryInBytes > peakTaskUserMemory.get()) {
+            peakTaskUserMemory.accumulateAndGet(taskUserMemoryInBytes, Math::max);
+        }
+        if (taskRevocableMemoryInBytes > peakTaskRevocableMemory.get()) {
+            peakTaskRevocableMemory.accumulateAndGet(taskRevocableMemoryInBytes, Math::max);
+        }
+        if (taskTotalMemoryInBytes > peakTaskTotalMemory.get()) {
+            peakTaskTotalMemory.accumulateAndGet(taskTotalMemoryInBytes, Math::max);
+        }
     }
 
     public BasicQueryInfo getBasicQueryInfo(Optional<BasicStageStats> rootStage)
@@ -851,6 +898,10 @@ public class QueryStateMachine
             }
         }
 
+        // Try to collect the catalog metadata metrics.
+        // The collection will fail, and we will use metrics collected earlier if
+        // the query is already committed or aborted and metadata is not available.
+        collectCatalogMetadataMetrics();
         return new QueryStats(
                 queryStateTimer.getCreateTime(),
                 getExecutionStartTime().orElse(null),
@@ -936,7 +987,7 @@ public class QueryStateMachine
                 stageGcStatistics.build(),
 
                 getDynamicFiltersStats(),
-
+                catalogMetadataMetrics.get(),
                 operatorStatsSummary.build(),
                 planOptimizersStatsCollector.getTopRuleStats());
     }
@@ -1167,6 +1218,7 @@ public class QueryStateMachine
             transitionToFailed(e);
             return true;
         }
+        collectCatalogMetadataMetrics();
 
         Optional<TransactionInfo> transaction = session.getTransactionId().flatMap(transactionManager::getTransactionInfoIfExist);
         if (transaction.isPresent() && transaction.get().isAutoCommitContext()) {
@@ -1244,6 +1296,7 @@ public class QueryStateMachine
             }
             return false;
         }
+        collectCatalogMetadataMetrics();
 
         try {
             if (log) {
@@ -1549,6 +1602,7 @@ public class QueryStateMachine
                 queryStats.getFailedPhysicalWrittenDataSize(),
                 queryStats.getStageGcStatistics(),
                 queryStats.getDynamicFiltersStats(),
+                ImmutableMap.of(),
                 ImmutableList.of(), // Remove the operator summaries as OperatorInfo (especially DirectExchangeClientStatus) can hold onto a large amount of memory
                 ImmutableList.of());
     }

@@ -257,7 +257,7 @@ public final class IcebergTestUtils
         while (fileIterator.hasNext()) {
             FileEntry entry = fileIterator.next();
             if (fromFilePath(entry.location().path()) == METADATA_JSON) {
-                TableMetadata tableMetadata = TableMetadataParser.read(null, new ForwardingInputFile(trinoFileSystem.newInputFile(entry.location())));
+                TableMetadata tableMetadata = TableMetadataParser.read(new ForwardingInputFile(trinoFileSystem.newInputFile(entry.location())));
                 metadataFiles.put(entry.location().path(), tableMetadata.lastUpdatedMillis());
             }
         }
@@ -267,7 +267,7 @@ public final class IcebergTestUtils
     public static ParquetMetadata getParquetFileMetadata(TrinoInputFile inputFile)
     {
         try (TrinoParquetDataSource dataSource = new TrinoParquetDataSource(inputFile, ParquetReaderOptions.defaultOptions(), new FileFormatDataSourceStats())) {
-            return MetadataReader.readFooter(dataSource);
+            return MetadataReader.readFooter(dataSource, Optional.empty());
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);

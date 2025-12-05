@@ -28,6 +28,7 @@ import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.LanguageFunction;
 import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Privilege;
@@ -112,7 +113,11 @@ public interface ConnectorMetadata
             Optional<ConnectorTableVersion> startVersion,
             Optional<ConnectorTableVersion> endVersion)
     {
-        throw new TrinoException(GENERIC_INTERNAL_ERROR, "ConnectorMetadata getTableHandle() is not implemented");
+        if (listTables(session, Optional.of(tableName.getSchemaName())).isEmpty()) {
+            // This is a correct default implementation meant primarily for connectors that do not have any tables.
+            return null;
+        }
+        throw new TrinoException(GENERIC_INTERNAL_ERROR, "ConnectorMetadata listTables() is implemented without getTableHandle()");
     }
 
     /**
@@ -160,9 +165,10 @@ public interface ConnectorMetadata
     }
 
     /**
-     * Execute a {@link TableProcedureExecutionMode#coordinatorOnly() coordinator-only} table procedure.
+     * Execute a {@link TableProcedureExecutionMode#coordinatorOnly() coordinator-only} table procedure
+     * and return procedure execution metrics that will be populated in the query output.
      */
-    default void executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
+    default Map<String, Long> executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
     {
         throw new TrinoException(GENERIC_INTERNAL_ERROR, "ConnectorMetadata executeTableExecute() is not implemented");
     }
@@ -246,6 +252,14 @@ public interface ConnectorMetadata
     default Optional<Object> getInfo(ConnectorSession session, ConnectorTableHandle table)
     {
         return Optional.empty();
+    }
+
+    /**
+     * Return connector-specific, metadata operations metrics for the given session.
+     */
+    default Metrics getMetrics(ConnectorSession session)
+    {
+        return Metrics.EMPTY;
     }
 
     /**
@@ -683,7 +697,20 @@ public interface ConnectorMetadata
 
     /**
      * Describes statistics that must be collected during a write.
+     *
+     * @param tableReplace indicates whether this is for table replace operation and statistics of an existing table (if any) should be ignored
      */
+    default TableStatisticsMetadata getStatisticsCollectionMetadataForWrite(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean tableReplace)
+    {
+        return getStatisticsCollectionMetadataForWrite(session, tableMetadata);
+    }
+
+    /**
+     * Describes statistics that must be collected during a write.
+     *
+     * @deprecated use {@link #getStatisticsCollectionMetadataForWrite(ConnectorSession, ConnectorTableMetadata, boolean)}
+     */
+    @Deprecated
     default TableStatisticsMetadata getStatisticsCollectionMetadataForWrite(ConnectorSession session, ConnectorTableMetadata tableMetadata)
     {
         return TableStatisticsMetadata.empty();
@@ -723,7 +750,6 @@ public interface ConnectorMetadata
      */
     default ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
-        // Redirect to deprecated SPI to not break existing connectors
         if (replace) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
         }

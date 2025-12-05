@@ -162,6 +162,7 @@ import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.airlift.concurrent.Threads.virtualThreadsNamed;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
 import static io.airlift.json.JsonBinder.jsonBinder;
@@ -173,6 +174,7 @@ import static io.trino.server.InternalCommunicationHttpClientModule.internalHttp
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static java.util.concurrent.Executors.newThreadPerTaskExecutor;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
@@ -409,6 +411,9 @@ public class ServerMainModule
         jsonBinder(binder).addSerializerBinding(Slice.class).to(SliceSerializer.class);
         jsonBinder(binder).addDeserializerBinding(Slice.class).to(SliceDeserializer.class);
 
+        // configurable DataSize serialization
+        jsonBinder(binder).addSerializerBinding(DataSize.class).to(DataSizeSerializer.class);
+
         // node version
         binder.bind(NodeVersion.class).toInstance(new NodeVersion(nodeVersion));
 
@@ -540,9 +545,7 @@ public class ServerMainModule
         if (!config.isConcurrentStartup()) {
             return directExecutor();
         }
-        return new BoundedExecutor(
-                newCachedThreadPool(daemonThreadsNamed("startup-%s")),
-                Runtime.getRuntime().availableProcessors());
+        return newThreadPerTaskExecutor(virtualThreadsNamed("startup#v%s"));
     }
 
     @Provides

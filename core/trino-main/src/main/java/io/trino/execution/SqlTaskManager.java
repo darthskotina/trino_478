@@ -69,7 +69,6 @@ import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -233,7 +232,7 @@ public class SqlTaskManager
                             taskId,
                             locationFactory.createLocalTaskLocation(taskId),
                             nodeInfo.getNodeId(),
-                            queryContexts.getUnchecked(taskId.getQueryId()),
+                            queryContexts.getUnchecked(taskId.queryId()),
                             tracer,
                             sqlTaskExecutionFactory,
                             taskNotificationExecutor,
@@ -656,13 +655,11 @@ public class SqlTaskManager
     void removeOldTasks()
     {
         Instant oldestAllowedTask = Instant.now().minusMillis(infoCacheTime.toMillis());
-        tasks.asMap().values().stream()
-                .map(SqlTask::getTaskInfo)
-                .filter(Objects::nonNull)
-                .forEach(taskInfo -> {
-                    TaskId taskId = taskInfo.taskStatus().getTaskId();
+        tasks.asMap().values()
+                .forEach(sqlTask -> {
+                    TaskId taskId = sqlTask.getTaskId();
                     try {
-                        Instant endTime = taskInfo.stats().getEndTime();
+                        Instant endTime = sqlTask.getTaskEndTime();
                         if (endTime != null && endTime.isBefore(oldestAllowedTask)) {
                             // The removal here is concurrency safe with respect to any concurrent loads: the cache has no expiration,
                             // the taskId is in the cache, so there mustn't be an ongoing load.
@@ -680,20 +677,20 @@ public class SqlTaskManager
         Instant now = Instant.now();
         Instant oldestAllowedHeartbeat = now.minusMillis(clientTimeout.toMillis());
         for (SqlTask sqlTask : tasks.asMap().values()) {
+            TaskId taskId = sqlTask.getTaskId();
             try {
-                TaskInfo taskInfo = sqlTask.getTaskInfo();
-                TaskStatus taskStatus = taskInfo.taskStatus();
-                if (taskStatus.getState().isDone()) {
+                TaskState taskState = sqlTask.getTaskState();
+                if (taskState.isDone()) {
                     continue;
                 }
-                Instant lastHeartbeat = taskInfo.lastHeartbeat();
+                Instant lastHeartbeat = sqlTask.lastHeartbeat();
                 if (lastHeartbeat != null && lastHeartbeat.isBefore(oldestAllowedHeartbeat)) {
-                    log.info("Failing abandoned task %s", taskStatus.getTaskId());
-                    sqlTask.failed(new TrinoException(ABANDONED_TASK, format("Task %s has not been accessed since %s: currentTime %s", taskStatus.getTaskId(), lastHeartbeat, now)));
+                    log.info("Failing abandoned task %s", taskId);
+                    sqlTask.failed(new TrinoException(ABANDONED_TASK, format("Task %s has not been accessed since %s: currentTime %s", taskId, lastHeartbeat, now)));
                 }
             }
             catch (RuntimeException e) {
-                log.warn(e, "Error while inspecting age of task %s", sqlTask.getTaskId());
+                log.warn(e, "Error while inspecting age of task %s", taskId);
             }
         }
     }
@@ -793,7 +790,7 @@ public class SqlTaskManager
      * <li>We find long-running splits; we get A, B, C.</li>
      * <li>None of those is actually running JONI code.</li>
      * <li>just before when we investigate stack trace for A, the underlying thread already switched to some other unrelated split D; and D is actually running JONI</li>
-     * we get the stacktrace for what we believe is A, but it is for D, and we decide we should kill the task that A belongs to</li>
+     * <li>we get the stacktrace for what we believe is A, but it is for D, and we decide we should kill the task that A belongs to</li>
      * <li>(clash!!!) wrong decision is made</li>
      * </ol>
      * A proposed fix and more details of this issue are at: <a href="https://github.com/trinodb/trino/pull/13272">pull/13272</a>.
