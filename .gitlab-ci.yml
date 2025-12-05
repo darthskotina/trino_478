@@ -175,7 +175,7 @@ build-trino:
 
       # trino-encrypt-udfs
       if [ -f "plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-plugin-1.0-SNAPSHOT.jar" ]; then
-        cp plugin/trino-convert-to-western-digits/target/trino-encrypt-udfs-plugin-1.0-SNAPSHOT.jar artifacts/plugins/trino-encrypt-udfs/
+        cp plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-plugin-1.0-SNAPSHOT.jar artifacts/plugins/trino-encrypt-udfs/
         echo "Custom plugin trino-encrypt-udfs copied successfully"
       else
         echo "WARNING: trino-encrypt-udfs JAR not found"
@@ -368,7 +368,7 @@ deploy-to-artifactory-manual:
         ["api"]="api"
         ["big-sequence"]="big-sequence"
         ["convert-to-western-digits"]="convert-to-western-digits"
-        ["encrypt-udfs"]="encrypt-udfs"
+        ["trino-encrypt-udfs"]="encrypt-udfs"
         ["jwt"]="jwt"
       )
 
