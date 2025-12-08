@@ -118,7 +118,8 @@ public class DispatchManager
         return sql;
     }
 
-    private static String maskEncryptionKeys(String sql) {
+    private static String maskEncryptionKeys(String sql)
+    {
         String[] functions = {"encrypt", "decrypt"};
 
         for (String func : functions) {
@@ -149,16 +150,22 @@ public class DispatchManager
                         if (c == '\'') {
                             if (pos + 1 < sql.length() && sql.charAt(pos + 1) == '\'') {
                                 pos++;
-                            } else {
+                            }
+                            else {
                                 inString = false;
                             }
                         }
-                    } else {
+                    }
+                    else {
                         switch (c) {
                             case '\'' -> inString = true;
                             case '(' -> depth++;
                             case ')' -> depth--;
-                            case ',' -> { if (depth == 1) lastCommaAtDepth1 = pos; }
+                            case ',' -> {
+                                if (depth == 1) {
+                                    lastCommaAtDepth1 = pos;
+                                }
+                            }
                         }
                     }
                     pos++;
