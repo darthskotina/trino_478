@@ -107,6 +107,73 @@ public class DispatchManager
         if (l.contains("call_api") || (l.contains("call") && l.contains("api"))) {
             return "call api ****";
         }
+        if (l.contains("call_api") || (l.contains("call") && l.contains("api"))) {
+            return "call api ****";
+        }
+
+        if (l.contains("encrypt") || l.contains("decrypt")) {
+            sql = maskEncryptionKeys(sql);
+        }
+
+        return sql;
+    }
+
+    private static String maskEncryptionKeys(String sql) {
+        String[] functions = {"encrypt", "decrypt"};
+
+        for (String func : functions) {
+            String lowerSql = sql.toLowerCase(Locale.ENGLISH);
+            int searchStart = 0;
+            int funcIndex;
+
+            while ((funcIndex = lowerSql.indexOf(func, searchStart)) != -1) {
+                int parenStart = funcIndex + func.length();
+                while (parenStart < sql.length() && Character.isWhitespace(sql.charAt(parenStart))) {
+                    parenStart++;
+                }
+
+                if (parenStart >= sql.length() || sql.charAt(parenStart) != '(') {
+                    searchStart = funcIndex + 1;
+                    continue;
+                }
+
+                int depth = 1;
+                int pos = parenStart + 1;
+                int lastCommaAtDepth1 = -1;
+                boolean inString = false;
+
+                while (pos < sql.length() && depth > 0) {
+                    char c = sql.charAt(pos);
+
+                    if (inString) {
+                        if (c == '\'') {
+                            if (pos + 1 < sql.length() && sql.charAt(pos + 1) == '\'') {
+                                pos++;
+                            } else {
+                                inString = false;
+                            }
+                        }
+                    } else {
+                        switch (c) {
+                            case '\'' -> inString = true;
+                            case '(' -> depth++;
+                            case ')' -> depth--;
+                            case ',' -> { if (depth == 1) lastCommaAtDepth1 = pos; }
+                        }
+                    }
+                    pos++;
+                }
+
+                int closingParen = pos - 1;
+
+                if (lastCommaAtDepth1 != -1 && closingParen > lastCommaAtDepth1) {
+                    sql = sql.substring(0, lastCommaAtDepth1 + 1) + " '****'" + sql.substring(closingParen);
+                    lowerSql = sql.toLowerCase(Locale.ENGLISH);
+                }
+
+                searchStart = funcIndex + 1;
+            }
+        }
 
         return sql;
     }
