@@ -570,7 +570,7 @@ deploy-to-artifactory-auto:
         ["api"]="api"
         ["big-sequence"]="big-sequence"
         ["convert-to-western-digits"]="convert-to-western-digits"
-        ["encrypt-udfs"]="encrypt-udfs"
+        ["trino-encrypt-udfs"]="encrypt-udfs"
         ["jwt"]="jwt"
       )
 
