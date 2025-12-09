@@ -105,9 +105,6 @@ public class DispatchManager
             return "create catalog ****";
         }
         if (l.contains("call_api") || (l.contains("call") && l.contains("api"))) {
-            return "call api ****";
-        }
-        if (l.contains("call_api") || (l.contains("call") && l.contains("api"))) {
             sql = maskCallApiParams(sql);
         }
         if (l.contains("encrypt") || l.contains("decrypt")) {
