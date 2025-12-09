@@ -77,7 +77,7 @@ build-trino:
     - echo "Building Trino plugins and core components..."
     - |
       ./mvnw clean package -DskipTests -Dgit-commit-id.skip=true \
-        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,plugin/trino-storage,plugin/trino-random-functions,plugin/trino-api,plugin/trino-big-sequence,plugin/trino-convert-to-western-digits,plugin/trino-jwt,core/trino-main \
+        -pl plugin/trino-postgresql,plugin/trino-vertica,plugin/trino-kafka,plugin/trino-delta-lake,plugin/trino-iceberg,plugin/trino-storage,plugin/trino-random-functions,plugin/trino-api,plugin/trino-big-sequence,plugin/trino-convert-to-western-digits,plugin/trino-encrypt-udfs,plugin/trino-jwt,core/trino-main \
         -am \
         -T 1C
 
@@ -94,6 +94,7 @@ build-trino:
     - mkdir -p artifacts/plugins/api
     - mkdir -p artifacts/plugins/big-sequence
     - mkdir -p artifacts/plugins/convert-to-western-digits
+    - mkdir -p artifacts/plugins/trino-encrypt-udfs
     - mkdir -p artifacts/plugins/jwt
 
     - mkdir -p artifacts/core
@@ -170,6 +171,14 @@ build-trino:
         echo "Custom plugin trino-convert-to-western-digits copied successfully"
       else
         echo "WARNING: trino-convert-to-western-digits JAR not found"
+      fi
+
+      # trino-encrypt-udfs
+      if [ -f "plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-1.0.0-SNAPSHOT.jar" ]; then
+        cp plugin/trino-encrypt-udfs/target/trino-encrypt-udfs-1.0.0-SNAPSHOT.jar artifacts/plugins/trino-encrypt-udfs/
+        echo "Custom plugin trino-encrypt-udfs copied successfully"
+      else
+        echo "WARNING: trino-encrypt-udfs JAR not found"
       fi
 
       # trino-jwt
@@ -359,6 +368,7 @@ deploy-to-artifactory-manual:
         ["api"]="api"
         ["big-sequence"]="big-sequence"
         ["convert-to-western-digits"]="convert-to-western-digits"
+        ["trino-encrypt-udfs"]="encrypt-udfs"
         ["jwt"]="jwt"
       )
 
@@ -560,6 +570,7 @@ deploy-to-artifactory-auto:
         ["api"]="api"
         ["big-sequence"]="big-sequence"
         ["convert-to-western-digits"]="convert-to-western-digits"
+        ["encrypt-udfs"]="encrypt-udfs"
         ["jwt"]="jwt"
       )
 
