@@ -12,18 +12,25 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.URI;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ApiFunctions {
     private static final ConcurrentHashMap<String, String> CACHE = new ConcurrentHashMap<>();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    @Description("Calls a REST API with optional auth, method, headers, body; returns response as string")
+    @Description("Calls a REST API; if return_meta is true, returns JSON with status, headers, cookies, body; otherwise returns response body")
     @ScalarFunction("call_api")
     @SqlType(StandardTypes.VARCHAR)
     public static Slice callApi(
@@ -33,7 +40,8 @@ public class ApiFunctions {
             @SqlType(StandardTypes.VARCHAR) Slice authType,
             @SqlType(StandardTypes.VARCHAR) Slice method,
             @SqlType(StandardTypes.VARCHAR) Slice headersJson,
-            @SqlType(StandardTypes.VARCHAR) Slice requestBody
+            @SqlType(StandardTypes.VARCHAR) Slice requestBody,
+            @SqlType(StandardTypes.BOOLEAN) boolean returnMeta
     ) {
         String urlString = apiUrl.toStringUtf8();
         String user = usernameOrToken.toStringUtf8();
@@ -43,65 +51,108 @@ public class ApiFunctions {
         String headersRaw = headersJson.toStringUtf8();
         String bodyContent = requestBody.toStringUtf8();
 
-        String cacheKey = urlString + "|" + user + "|" + pass + "|" + auth + "|" + httpMethod + "|" + headersRaw + "|" + bodyContent;
+        String cacheKey = urlString + "|" + user + "|" + pass + "|" + auth + "|" + httpMethod + "|" + headersRaw + "|" + bodyContent + "|" + returnMeta;
         if (CACHE.containsKey(cacheKey)) {
             return Slices.utf8Slice(CACHE.get(cacheKey));
         }
 
         try {
-            URL url = new URL(urlString);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod(httpMethod);
+            Response response = executeRequest(
+                    urlString,
+                    user,
+                    pass,
+                    auth,
+                    httpMethod,
+                    headersRaw,
+                    bodyContent
+            );
 
-            // Authorization
-            if (auth.equalsIgnoreCase("basic")) {
-                String credentials = user + ":" + pass;
-                String encoded = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
-                conn.setRequestProperty("Authorization", "Basic " + encoded);
-            } else if (auth.equalsIgnoreCase("bearer")) {
-                conn.setRequestProperty("Authorization", "Bearer " + user);
-            }
-
-            // Headers
-            if (!headersRaw.isEmpty()) {
-                Map<String, String> headers = OBJECT_MAPPER.readValue(headersRaw, new TypeReference<Map<String, String>>() {});
-                for (Map.Entry<String, String> entry : headers.entrySet()) {
-                    conn.setRequestProperty(entry.getKey(), entry.getValue());
-                }
-            }
-
-            // POST or PUT body
-            if (httpMethod.equals("POST") || httpMethod.equals("PUT")) {
-                conn.setDoOutput(true);
-                byte[] inputBytes = bodyContent.getBytes(StandardCharsets.UTF_8);
-                conn.setRequestProperty("Content-Length", Integer.toString(inputBytes.length));
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(inputBytes);
-                }
-            }
-
-            int responseCode = conn.getResponseCode();
-            BufferedReader reader;
-            if (responseCode >= 200 && responseCode < 300) {
-                reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+            String result;
+            if (returnMeta) {
+                Map<String, Object> payload = new LinkedHashMap<>();
+                payload.put("status", response.status);
+                payload.put("headers", response.headers);
+                payload.put("cookies", response.cookies);
+                payload.put("body", response.body);
+                result = OBJECT_MAPPER.writeValueAsString(payload);
             } else {
-                reader = new BufferedReader(new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8));
+                result = (response.status >= 200 && response.status < 300)
+                        ? response.body
+                        : "HTTP_ERROR: " + response.status + " BODY: " + response.body;
             }
-
-            StringBuilder response = new StringBuilder();
-            String inputLine;
-            while ((inputLine = reader.readLine()) != null) {
-                response.append(inputLine);
-            }
-            reader.close();
-            conn.disconnect();
-
-            String result = (responseCode >= 200 && responseCode < 300) ? response.toString() : "HTTP_ERROR: " + responseCode + " BODY: " + response.toString();
             CACHE.put(cacheKey, result);
 
             return Slices.utf8Slice(result);
         } catch (Exception e) {
             return Slices.utf8Slice("ERROR: " + e.getMessage());
+        }
+    }
+
+    private static Response executeRequest(
+            String urlString,
+            String user,
+            String pass,
+            String auth,
+            String httpMethod,
+            String headersRaw,
+            String bodyContent
+    ) throws Exception {
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
+
+        HttpRequest.BodyPublisher bodyPublisher = HttpRequest.BodyPublishers.noBody();
+        if (httpMethod.equals("POST") || httpMethod.equals("PUT")) {
+            bodyPublisher = HttpRequest.BodyPublishers.ofString(bodyContent, StandardCharsets.UTF_8);
+        }
+
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(urlString))
+                .method(httpMethod, bodyPublisher);
+
+        // Authorization
+        if (auth.equalsIgnoreCase("basic")) {
+            String credentials = user + ":" + pass;
+            String encoded = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+            requestBuilder.header("Authorization", "Basic " + encoded);
+        } else if (auth.equalsIgnoreCase("bearer")) {
+            requestBuilder.header("Authorization", "Bearer " + user);
+        }
+
+        // Headers
+        if (!headersRaw.isEmpty()) {
+            Map<String, String> headers = OBJECT_MAPPER.readValue(headersRaw, new TypeReference<Map<String, String>>() {});
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                requestBuilder.header(entry.getKey(), entry.getValue());
+            }
+        }
+
+        HttpResponse<String> response = client.send(
+                requestBuilder.build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+        );
+
+        Map<String, List<String>> headers = new LinkedHashMap<>(response.headers().map());
+
+        List<String> cookies = headers.entrySet().stream()
+                .filter(entry -> entry.getKey() != null && entry.getKey().equalsIgnoreCase("Set-Cookie"))
+                .flatMap(entry -> entry.getValue().stream())
+                .collect(Collectors.toList());
+
+        return new Response(response.statusCode(), response.body(), headers, cookies);
+    }
+
+    private static class Response {
+        private final int status;
+        private final String body;
+        private final Map<String, List<String>> headers;
+        private final List<String> cookies;
+
+        private Response(int status, String body, Map<String, List<String>> headers, List<String> cookies) {
+            this.status = status;
+            this.body = body;
+            this.headers = headers;
+            this.cookies = cookies;
         }
     }
 }
