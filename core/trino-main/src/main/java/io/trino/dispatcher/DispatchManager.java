@@ -419,12 +419,10 @@ public class DispatchManager
     {
         Session session = null;
         PreparedQuery preparedQuery = null;
-        String maskedQuery = query;
         try {
             if (query.length() > maxQueryLength) {
                 int queryLength = query.length();
                 query = query.substring(0, maxQueryLength);
-                maskedQuery = query;
                 throw new TrinoException(QUERY_TEXT_TOO_LARGE, format("Query text length (%s) exceeds the maximum length (%s)", queryLength, maxQueryLength));
             }
 
@@ -452,7 +450,7 @@ public class DispatchManager
 
             // apply system default session properties (does not override user set properties)
             session = sessionPropertyDefaults.newSessionWithDefaultProperties(session, queryType, selectionContext.getResourceGroupId());
-            maskedQuery = maskIfSensFunction(query);
+            String maskedQuery = maskIfSensFunction(query);
 
             DispatchQuery dispatchQuery = dispatchQueryFactory.createDispatchQuery(
                     session,
@@ -484,7 +482,7 @@ public class DispatchManager
                         .build();
             }
             Optional<String> preparedSql = Optional.ofNullable(preparedQuery).flatMap(PreparedQuery::getPrepareSql);
-            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, maskedQuery, preparedSql, Optional.empty(), throwable);
+            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, maskIfSensFunction(query), preparedSql, Optional.empty(), throwable);
             queryCreated(failedDispatchQuery);
             // maintain proper order of calls such that EventListener has access to QueryInfo
             // - add query to tracker
