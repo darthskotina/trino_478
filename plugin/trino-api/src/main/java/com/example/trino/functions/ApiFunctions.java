@@ -30,6 +30,21 @@ public class ApiFunctions {
     private static final ConcurrentHashMap<String, String> CACHE = new ConcurrentHashMap<>();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    @Description("Calls a REST API with optional auth, method, headers, body; returns response as string")
+    @ScalarFunction("call_api")
+    @SqlType(StandardTypes.VARCHAR)
+    public static Slice callApi(
+            @SqlType(StandardTypes.VARCHAR) Slice apiUrl,
+            @SqlType(StandardTypes.VARCHAR) Slice usernameOrToken,
+            @SqlType(StandardTypes.VARCHAR) Slice password,
+            @SqlType(StandardTypes.VARCHAR) Slice authType,
+            @SqlType(StandardTypes.VARCHAR) Slice method,
+            @SqlType(StandardTypes.VARCHAR) Slice headersJson,
+            @SqlType(StandardTypes.VARCHAR) Slice requestBody
+    ) {
+        return callApi(apiUrl, usernameOrToken, password, authType, method, headersJson, requestBody, false);
+    }
+
     @Description("Calls a REST API; if return_meta is true, returns JSON with status, headers, cookies, body; otherwise returns response body")
     @ScalarFunction("call_api")
     @SqlType(StandardTypes.VARCHAR)
