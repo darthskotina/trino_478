@@ -19,7 +19,7 @@
         <dependency>
             <groupId>io.trino</groupId>
             <artifactId>trino-spi</artifactId>
-            <version>475</version>
+            <version>478</version>
             <scope>provided</scope>
         </dependency>
 

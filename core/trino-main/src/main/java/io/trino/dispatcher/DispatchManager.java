@@ -51,6 +51,7 @@ import org.weakref.jmx.Flatten;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -75,6 +76,8 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 public class DispatchManager
 {
     private static final Logger log = Logger.get(DispatchManager.class);
+    private static final String MASKED_CALL_API_QUERY = "call api ****";
+    private static final String MASKED_ENCRYPT_DECRYPT_QUERY = "encrypt/decrypt ****";
 
     private final QueryIdGenerator queryIdGenerator;
     private final QueryPreparer queryPreparer;
@@ -97,7 +100,7 @@ public class DispatchManager
     private final QueryMonitor queryMonitor;
     private final ScheduledExecutorService statsUpdaterExecutor;
 
-    private static String maskIfSensFunction(String sql)
+    static String maskIfSensFunction(String sql)
     {
         String l = sql.toLowerCase(Locale.ENGLISH);
 
@@ -105,10 +108,20 @@ public class DispatchManager
             return "create catalog ****";
         }
         if (l.contains("call_api") || (l.contains("call") && l.contains("api"))) {
-            sql = maskCallApiParams(sql);
+            try {
+                sql = maskCallApiParams(sql);
+            }
+            catch (RuntimeException e) {
+                return MASKED_CALL_API_QUERY;
+            }
         }
         if (l.contains("encrypt") || l.contains("decrypt")) {
-            sql = maskEncryptionKeys(sql);
+            try {
+                sql = maskEncryptionKeys(sql);
+            }
+            catch (RuntimeException e) {
+                return MASKED_ENCRYPT_DECRYPT_QUERY;
+            }
         }
 
         return sql;
@@ -138,11 +151,8 @@ public class DispatchManager
             int depth = 1;
             int pos = parenStart + 1;
             boolean inString = false;
-
-            int[] argStarts = new int[8];
-            int[] argEnds = new int[8];
-            int argCount = 1;
-            argStarts[0] = pos;
+            int argumentStart = pos;
+            List<int[]> argumentBounds = new ArrayList<>();
 
             while (pos < sql.length() && depth > 0) {
                 char c = sql.charAt(pos);
@@ -167,15 +177,14 @@ public class DispatchManager
                             break;
                         case ')':
                             depth--;
-                            if (depth == 0 && argCount <= 7) {
-                                argEnds[argCount - 1] = pos;
+                            if (depth == 0) {
+                                argumentBounds.add(new int[] {argumentStart, pos});
                             }
                             break;
                         case ',':
-                            if (depth == 1 && argCount <= 7) {
-                                argEnds[argCount - 1] = pos;
-                                argCount++;
-                                argStarts[argCount - 1] = pos + 1;
+                            if (depth == 1) {
+                                argumentBounds.add(new int[] {argumentStart, pos});
+                                argumentStart = pos + 1;
                             }
                             break;
                         default:
@@ -185,35 +194,42 @@ public class DispatchManager
                 pos++;
             }
 
-            if (argCount >= 1) {
-                StringBuilder masked = new StringBuilder();
-                masked.append(sql, 0, argStarts[0]);
+            if (depth != 0) {
+                throw new IllegalArgumentException("Malformed call_api expression");
+            }
+            if (argumentBounds.isEmpty()) {
+                searchStart = funcIndex + 1;
+                continue;
+            }
 
-                for (int i = 0; i < argCount; i++) {
-                    boolean shouldMask = false;
-                    for (int maskPos : positionsToMask) {
-                        if (i + 1 == maskPos) {
-                            shouldMask = true;
-                            break;
-                        }
-                    }
+            StringBuilder masked = new StringBuilder();
+            masked.append(sql, 0, argumentBounds.get(0)[0]);
 
-                    if (shouldMask) {
-                        masked.append(" '****'");
-                    }
-                    else {
-                        masked.append(sql, argStarts[i], argEnds[i]);
-                    }
-
-                    if (i < argCount - 1) {
-                        masked.append(",");
+            for (int i = 0; i < argumentBounds.size(); i++) {
+                int[] argument = argumentBounds.get(i);
+                boolean shouldMask = false;
+                for (int maskPos : positionsToMask) {
+                    if (i + 1 == maskPos) {
+                        shouldMask = true;
+                        break;
                     }
                 }
 
-                masked.append(sql.substring(argEnds[argCount - 1]));
-                sql = masked.toString();
-                lowerSql = sql.toLowerCase(Locale.ENGLISH);
+                if (shouldMask) {
+                    masked.append(" '****'");
+                }
+                else {
+                    masked.append(sql, argument[0], argument[1]);
+                }
+
+                if (i < argumentBounds.size() - 1) {
+                    masked.append(",");
+                }
             }
+
+            masked.append(sql.substring(argumentBounds.get(argumentBounds.size() - 1)[1]));
+            sql = masked.toString();
+            lowerSql = sql.toLowerCase(Locale.ENGLISH);
 
             searchStart = funcIndex + 1;
         }
@@ -274,6 +290,9 @@ public class DispatchManager
                     pos++;
                 }
 
+                if (depth != 0) {
+                    throw new IllegalArgumentException(format("Malformed %s expression", func));
+                }
                 int closingParen = pos - 1;
 
                 if (lastCommaAtDepth1 != -1 && closingParen > lastCommaAtDepth1) {
@@ -431,11 +450,12 @@ public class DispatchManager
 
             // apply system default session properties (does not override user set properties)
             session = sessionPropertyDefaults.newSessionWithDefaultProperties(session, queryType, selectionContext.getResourceGroupId());
+            String maskedQuery = maskIfSensFunction(query);
 
             DispatchQuery dispatchQuery = dispatchQueryFactory.createDispatchQuery(
                     session,
                     sessionContext.getTransactionId(),
-                    maskIfSensFunction(query),
+                    maskedQuery,
                     preparedQuery,
                     slug,
                     selectionContext.getResourceGroupId());
