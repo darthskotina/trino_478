@@ -34,20 +34,27 @@ public class ProtobufRowDecoder
 
     private final DynamicMessageProvider dynamicMessageProvider;
     private final Map<DecoderColumnHandle, ProtobufColumnDecoder> columnDecoders;
+    private final Optional<Integer> dataOffset;
 
-    public ProtobufRowDecoder(DynamicMessageProvider dynamicMessageProvider, Set<DecoderColumnHandle> columns, TypeManager typeManager, DescriptorProvider descriptorProvider)
+    public ProtobufRowDecoder(DynamicMessageProvider dynamicMessageProvider, Set<DecoderColumnHandle> columns, TypeManager typeManager, DescriptorProvider descriptorProvider, Optional<Integer> dataOffset)
     {
         this.dynamicMessageProvider = requireNonNull(dynamicMessageProvider, "dynamicMessageSupplier is null");
         this.columnDecoders = columns.stream()
                 .collect(toImmutableMap(
                         identity(),
                         column -> new ProtobufColumnDecoder(column, typeManager, descriptorProvider)));
+        this.dataOffset = requireNonNull(dataOffset, "dataOffset is null");
+    }
+
+    public ProtobufRowDecoder(DynamicMessageProvider dynamicMessageProvider, Set<DecoderColumnHandle> columns, TypeManager typeManager, DescriptorProvider descriptorProvider)
+    {
+        this(dynamicMessageProvider, columns, typeManager, descriptorProvider, Optional.empty());
     }
 
     @Override
     public Optional<Map<DecoderColumnHandle, FieldValueProvider>> decodeRow(byte[] data)
     {
-        DynamicMessage message = dynamicMessageProvider.parseDynamicMessage(data);
+        DynamicMessage message = dynamicMessageProvider.parseDynamicMessage(data, dataOffset.orElse(0));
         return Optional.of(columnDecoders.entrySet().stream()
                 .collect(toImmutableMap(
                         Map.Entry::getKey,

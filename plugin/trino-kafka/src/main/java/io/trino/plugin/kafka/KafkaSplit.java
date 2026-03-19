@@ -39,6 +39,7 @@ public class KafkaSplit
     private final String messageDataFormat;
     private final Optional<String> keyDataSchemaContents;
     private final Optional<String> messageDataSchemaContents;
+    private final Optional<Integer> messageDataOffset;
     private final int partitionId;
     private final Range messagesRange;
     private final HostAddress leader;
@@ -50,6 +51,7 @@ public class KafkaSplit
             @JsonProperty("messageDataFormat") String messageDataFormat,
             @JsonProperty("keyDataSchemaContents") Optional<String> keyDataSchemaContents,
             @JsonProperty("messageDataSchemaContents") Optional<String> messageDataSchemaContents,
+            @JsonProperty("messageDataOffset") Optional<Integer> messageDataOffset,
             @JsonProperty("partitionId") int partitionId,
             @JsonProperty("messagesRange") Range messagesRange,
             @JsonProperty("leader") HostAddress leader)
@@ -59,9 +61,32 @@ public class KafkaSplit
         this.messageDataFormat = requireNonNull(messageDataFormat, "messageDataFormat is null");
         this.keyDataSchemaContents = requireNonNull(keyDataSchemaContents, "keyDataSchemaContents is null");
         this.messageDataSchemaContents = requireNonNull(messageDataSchemaContents, "messageDataSchemaContents is null");
+        this.messageDataOffset = requireNonNull(messageDataOffset, "messageDataOffset is null");
         this.partitionId = partitionId;
         this.messagesRange = requireNonNull(messagesRange, "messagesRange is null");
         this.leader = requireNonNull(leader, "leader is null");
+    }
+
+    public KafkaSplit(
+            String topicName,
+            String keyDataFormat,
+            String messageDataFormat,
+            Optional<String> keyDataSchemaContents,
+            Optional<String> messageDataSchemaContents,
+            int partitionId,
+            Range messagesRange,
+            HostAddress leader)
+    {
+        this(
+                topicName,
+                keyDataFormat,
+                messageDataFormat,
+                keyDataSchemaContents,
+                messageDataSchemaContents,
+                Optional.empty(),
+                partitionId,
+                messagesRange,
+                leader);
     }
 
     @JsonProperty
@@ -92,6 +117,12 @@ public class KafkaSplit
     public Optional<String> getMessageDataSchemaContents()
     {
         return messageDataSchemaContents;
+    }
+
+    @JsonProperty
+    public Optional<Integer> getMessageDataOffset()
+    {
+        return messageDataOffset;
     }
 
     @JsonProperty
@@ -127,6 +158,7 @@ public class KafkaSplit
                 + estimatedSizeOf(messageDataFormat)
                 + sizeOf(keyDataSchemaContents, SizeOf::estimatedSizeOf)
                 + sizeOf(messageDataSchemaContents, SizeOf::estimatedSizeOf)
+                + sizeOf(messageDataOffset, SizeOf::sizeOf)
                 + messagesRange.retainedSizeInBytes()
                 + leader.getRetainedSizeInBytes();
     }
@@ -140,6 +172,7 @@ public class KafkaSplit
                 .add("messageDataFormat", messageDataFormat)
                 .add("keyDataSchemaContents", keyDataSchemaContents)
                 .add("messageDataSchemaContents", messageDataSchemaContents)
+                .add("messageDataOffset", messageDataOffset)
                 .add("partitionId", partitionId)
                 .add("messagesRange", messagesRange)
                 .add("leader", leader)

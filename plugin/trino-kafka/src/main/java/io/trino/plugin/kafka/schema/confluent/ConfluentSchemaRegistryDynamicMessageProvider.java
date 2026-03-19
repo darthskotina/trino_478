@@ -57,7 +57,13 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
     @Override
     public DynamicMessage parseDynamicMessage(byte[] data)
     {
-        ByteBuffer buffer = ByteBuffer.wrap(data);
+        return parseDynamicMessage(data, 0);
+    }
+
+    @Override
+    public DynamicMessage parseDynamicMessage(byte[] data, int offset)
+    {
+        ByteBuffer buffer = ByteBuffer.wrap(data, offset, data.length - offset);
         byte magicByte = buffer.get();
         checkArgument(magicByte == MAGIC_BYTE, "Invalid MagicByte");
         int schemaId = buffer.getInt();

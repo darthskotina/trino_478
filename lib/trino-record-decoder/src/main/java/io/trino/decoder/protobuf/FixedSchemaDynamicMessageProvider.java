@@ -38,7 +38,17 @@ public class FixedSchemaDynamicMessageProvider
     @Override
     public DynamicMessage parseDynamicMessage(byte[] data)
     {
+        return parseDynamicMessage(data, 0);
+    }
+
+    public DynamicMessage parseDynamicMessage(byte[] data, int offset)
+    {
         try {
+            if (offset > 0) {
+                return DynamicMessage.newBuilder(descriptor)
+                        .mergeFrom(data, offset, data.length - offset)
+                        .build();
+            }
             return DynamicMessage.parseFrom(descriptor, data);
         }
         catch (InvalidProtocolBufferException e) {

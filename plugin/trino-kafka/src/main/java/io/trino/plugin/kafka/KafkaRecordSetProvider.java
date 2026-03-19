@@ -33,6 +33,7 @@ import java.util.Optional;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.decoder.avro.AvroRowDecoderFactory.DATA_SCHEMA;
+import static io.trino.decoder.protobuf.ProtobufRowDecoderFactory.DATA_OFFSET;
 import static java.util.Objects.requireNonNull;
 
 public class KafkaRecordSetProvider
@@ -63,7 +64,7 @@ public class KafkaRecordSetProvider
                 session,
                 new RowDecoderSpec(
                         kafkaSplit.getKeyDataFormat(),
-                        getDecoderParameters(kafkaSplit.getKeyDataSchemaContents()),
+                        getDecoderParameters(kafkaSplit.getKeyDataSchemaContents(), Optional.empty()),
                         kafkaColumns.stream()
                                 .filter(col -> !col.isInternal())
                                 .filter(KafkaColumnHandle::isKeyCodec)
@@ -73,7 +74,7 @@ public class KafkaRecordSetProvider
                 session,
                 new RowDecoderSpec(
                         kafkaSplit.getMessageDataFormat(),
-                        getDecoderParameters(kafkaSplit.getMessageDataSchemaContents()),
+                        getDecoderParameters(kafkaSplit.getMessageDataSchemaContents(), kafkaSplit.getMessageDataOffset()),
                         kafkaColumns.stream()
                                 .filter(col -> !col.isInternal())
                                 .filter(col -> !col.isKeyCodec())
@@ -82,10 +83,11 @@ public class KafkaRecordSetProvider
         return new KafkaRecordSet(kafkaSplit, consumerFactory, session, kafkaColumns, keyDecoder, messageDecoder, kafkaInternalFieldManager);
     }
 
-    private static Map<String, String> getDecoderParameters(Optional<String> dataSchema)
+    private static Map<String, String> getDecoderParameters(Optional<String> dataSchema, Optional<Integer> dataOffset)
     {
         ImmutableMap.Builder<String, String> parameters = ImmutableMap.builder();
         dataSchema.ifPresent(schema -> parameters.put(DATA_SCHEMA, schema));
+        dataOffset.ifPresent(offset -> parameters.put(DATA_OFFSET, String.valueOf(offset)));
         return parameters.buildOrThrow();
     }
 }

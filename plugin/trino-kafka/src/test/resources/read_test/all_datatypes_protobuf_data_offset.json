@@ -1,0 +1,17 @@
+{
+    "tableName": "all_datatypes_protobuf_data_offset",
+    "schemaName": "read_test",
+    "topicName": "all_datatypes_protobuf_data_offset",
+    "message": {
+        "dataFormat": "protobuf",
+        "dataSchema": "decoder/protobuf/all_datatypes.proto",
+        "dataOffset": 5,
+        "fields": [
+            {
+                "name": "f_varchar",
+                "type": "VARCHAR",
+                "mapping": "stringColumn"
+            }
+        ]
+    }
+}

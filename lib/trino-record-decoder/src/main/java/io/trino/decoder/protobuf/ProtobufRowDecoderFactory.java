@@ -29,6 +29,7 @@ public class ProtobufRowDecoderFactory
         implements RowDecoderFactory
 {
     public static final String DEFAULT_MESSAGE = "schema";
+    public static final String DATA_OFFSET = "dataOffset";
 
     private final Factory dynamicMessageProviderFactory;
     private final TypeManager typeManager;
@@ -49,6 +50,7 @@ public class ProtobufRowDecoderFactory
                 dynamicMessageProviderFactory.create(Optional.ofNullable(rowDecoderSpec.decoderParams().get("dataSchema"))),
                 rowDecoderSpec.columns(),
                 typeManager,
-                descriptorProvider);
+                descriptorProvider,
+                Optional.ofNullable(rowDecoderSpec.decoderParams().get(DATA_OFFSET)).map(Integer::parseInt));
     }
 }

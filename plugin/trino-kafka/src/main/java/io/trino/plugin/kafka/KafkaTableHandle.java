@@ -41,6 +41,7 @@ public record KafkaTableHandle(
         Optional<String> messageDataSchemaLocation,
         Optional<String> keySubject,
         Optional<String> messageSubject,
+        Optional<Integer> messageDataOffset,
         List<KafkaColumnHandle> columns,
         TupleDomain<ColumnHandle> constraint)
         implements ConnectorTableHandle, ConnectorInsertTableHandle
@@ -56,8 +57,37 @@ public record KafkaTableHandle(
         requireNonNull(messageDataSchemaLocation, "messageDataSchemaLocation is null");
         requireNonNull(keySubject, "keySubject is null");
         requireNonNull(messageSubject, "messageSubject is null");
+        requireNonNull(messageDataOffset, "messageDataOffset is null");
         columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
         requireNonNull(constraint, "constraint is null");
+    }
+
+    public KafkaTableHandle(
+            String schemaName,
+            String tableName,
+            String topicName,
+            String keyDataFormat,
+            String messageDataFormat,
+            Optional<String> keyDataSchemaLocation,
+            Optional<String> messageDataSchemaLocation,
+            Optional<String> keySubject,
+            Optional<String> messageSubject,
+            List<KafkaColumnHandle> columns,
+            TupleDomain<ColumnHandle> constraint)
+    {
+        this(
+                schemaName,
+                tableName,
+                topicName,
+                keyDataFormat,
+                messageDataFormat,
+                keyDataSchemaLocation,
+                messageDataSchemaLocation,
+                keySubject,
+                messageSubject,
+                Optional.empty(),
+                columns,
+                constraint);
     }
 
     public SchemaTableName schemaTableName()

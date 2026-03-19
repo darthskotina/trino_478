@@ -27,7 +27,8 @@ public record KafkaTopicFieldGroup(
         String dataFormat,
         Optional<String> dataSchema,
         Optional<String> subject,
-        List<KafkaTopicFieldDescription> fields)
+        List<KafkaTopicFieldDescription> fields,
+        Optional<Integer> dataOffset)
 {
     public KafkaTopicFieldGroup
     {
@@ -35,5 +36,15 @@ public record KafkaTopicFieldGroup(
         requireNonNull(dataSchema, "dataSchema is null");
         requireNonNull(subject, "subject is null");
         fields = ImmutableList.copyOf(requireNonNull(fields, "fields is null"));
+        requireNonNull(dataOffset, "dataOffset is null");
+    }
+
+    public KafkaTopicFieldGroup(
+            String dataFormat,
+            Optional<String> dataSchema,
+            Optional<String> subject,
+            List<KafkaTopicFieldDescription> fields)
+    {
+        this(dataFormat, dataSchema, subject, fields, Optional.empty());
     }
 }

@@ -21,6 +21,8 @@ public interface DynamicMessageProvider
 {
     DynamicMessage parseDynamicMessage(byte[] data);
 
+    DynamicMessage parseDynamicMessage(byte[] data, int offset);
+
     interface Factory
     {
         DynamicMessageProvider create(Optional<String> protoFile);

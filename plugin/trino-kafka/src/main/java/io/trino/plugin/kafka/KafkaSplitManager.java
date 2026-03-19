@@ -95,6 +95,7 @@ public class KafkaSplitManager
                                 kafkaTableHandle.messageDataFormat(),
                                 keyDataSchemaContents,
                                 messageDataSchemaContents,
+                                kafkaTableHandle.messageDataOffset(),
                                 partitionInfo.partition(),
                                 range,
                                 leader))
