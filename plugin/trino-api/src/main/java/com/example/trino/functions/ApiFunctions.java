@@ -9,12 +9,7 @@ import io.trino.spi.type.StandardTypes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.net.URI;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -116,10 +111,7 @@ public class ApiFunctions {
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
 
-        HttpRequest.BodyPublisher bodyPublisher = HttpRequest.BodyPublishers.noBody();
-        if (httpMethod.equals("POST") || httpMethod.equals("PUT")) {
-            bodyPublisher = HttpRequest.BodyPublishers.ofString(bodyContent, StandardCharsets.UTF_8);
-        }
+        HttpRequest.BodyPublisher bodyPublisher = buildBodyPublisher(httpMethod, bodyContent);
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(urlString))
@@ -155,6 +147,20 @@ public class ApiFunctions {
                 .collect(Collectors.toList());
 
         return new Response(response.statusCode(), response.body(), headers, cookies);
+    }
+
+    private static HttpRequest.BodyPublisher buildBodyPublisher(String httpMethod, String bodyContent)
+    {
+        boolean shouldSendBody = switch (httpMethod) {
+            case "POST", "PUT" -> true;
+            case "GET", "PATCH", "DELETE" -> !bodyContent.isEmpty();
+            default -> false;
+        };
+
+        if (!shouldSendBody) {
+            return HttpRequest.BodyPublishers.noBody();
+        }
+        return HttpRequest.BodyPublishers.ofString(bodyContent, StandardCharsets.UTF_8);
     }
 
     private static class Response {
