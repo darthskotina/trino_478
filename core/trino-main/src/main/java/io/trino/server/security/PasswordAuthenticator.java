@@ -13,6 +13,7 @@
  */
 package io.trino.server.security;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.trino.client.ProtocolDetectionException;
 import io.trino.server.ProtocolConfig;
@@ -33,6 +34,9 @@ import static java.util.Objects.requireNonNull;
 public class PasswordAuthenticator
         implements Authenticator
 {
+    public static final String INTERNAL_AUTHENTICATED_USER_CREDENTIAL = "internal$authenticated_user";
+    public static final String INTERNAL_AUTHENTICATED_PASSWORD_CREDENTIAL = "internal$authenticated_password";
+
     private final PasswordAuthenticatorManager authenticatorManager;
     private final UserMapping userMapping;
     private final Optional<String> alternateHeaderName;
@@ -67,6 +71,9 @@ public class PasswordAuthenticator
                 rewriteUserHeaderToMappedUser(basicAuthCredentials, request.getHeaders(), authenticatedUser);
                 return Identity.forUser(authenticatedUser)
                         .withPrincipal(principal)
+                        .withExtraCredentials(ImmutableMap.of(
+                                INTERNAL_AUTHENTICATED_USER_CREDENTIAL, authenticatedUser,
+                                INTERNAL_AUTHENTICATED_PASSWORD_CREDENTIAL, password))
                         .build();
             }
             catch (UserMappingException | AccessDeniedException e) {
