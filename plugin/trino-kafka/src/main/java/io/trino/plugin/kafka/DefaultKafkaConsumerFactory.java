@@ -62,11 +62,16 @@ public class DefaultKafkaConsumerFactory
         properties.setProperty(VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         properties.setProperty(ENABLE_AUTO_COMMIT_CONFIG, Boolean.toString(false));
         properties.setProperty(RECEIVE_BUFFER_CONFIG, Long.toString(kafkaBufferSize.toBytes()));
-
-        // Set the consumer group ID
-        properties.setProperty(GROUP_ID_CONFIG, consumerGroupId);
-        System.out.println("Using Kafka consumer group ID: " + consumerGroupId);  // Add this line
+        properties.setProperty(GROUP_ID_CONFIG, getEffectiveConsumerGroupId(session));
 
         return properties;
+    }
+
+    private String getEffectiveConsumerGroupId(ConnectorSession session)
+    {
+        if (KafkaSessionProperties.isCommittedReadEnabled(session)) {
+            return KafkaSessionProperties.getRequiredCommittedReadGroupId(session);
+        }
+        return consumerGroupId;
     }
 }

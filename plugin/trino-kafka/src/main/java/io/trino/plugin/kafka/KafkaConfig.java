@@ -34,6 +34,7 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static java.util.Objects.requireNonNull;
 
 @DefunctConfig("kafka.connect-timeout")
 public class KafkaConfig
@@ -49,7 +50,9 @@ public class KafkaConfig
     private String tableDescriptionSupplier = FileTableDescriptionSupplier.NAME;
     private List<File> resourceConfigFiles = ImmutableList.of();
     private String internalFieldPrefix = "_";
-    private String consumerGroupId = "bigdata-spark-streaming";  // Default value
+    private String consumerGroupId = "bigdata-spark-streaming";
+    private boolean committedReadEnabled;
+    private KafkaCommittedReadMissingOffsetPolicy committedReadMissingOffsetPolicy = KafkaCommittedReadMissingOffsetPolicy.ERROR;
 
     @Size(min = 1)
     public Set<HostAddress> getNodes()
@@ -190,10 +193,37 @@ public class KafkaConfig
     }
 
     @Config("kafka.consumer-group-id")
-    @ConfigDescription("Consumer group ID to use when connecting to Kafka")
+    @ConfigDescription("Legacy consumer group ID used for default-mode Kafka consumers")
     public KafkaConfig setConsumerGroupId(String consumerGroupId)
     {
         this.consumerGroupId = consumerGroupId;
+        return this;
+    }
+
+    public boolean isCommittedReadEnabled()
+    {
+        return committedReadEnabled;
+    }
+
+    @Config("kafka.committed-read-enabled")
+    @ConfigDescription("Enable committed-read mode for Kafka scans by default")
+    public KafkaConfig setCommittedReadEnabled(boolean committedReadEnabled)
+    {
+        this.committedReadEnabled = committedReadEnabled;
+        return this;
+    }
+
+    @NotNull
+    public KafkaCommittedReadMissingOffsetPolicy getCommittedReadMissingOffsetPolicy()
+    {
+        return committedReadMissingOffsetPolicy;
+    }
+
+    @Config("kafka.committed-read-missing-offset-policy")
+    @ConfigDescription("How committed-read mode handles missing or invalid committed offsets")
+    public KafkaConfig setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy committedReadMissingOffsetPolicy)
+    {
+        this.committedReadMissingOffsetPolicy = requireNonNull(committedReadMissingOffsetPolicy, "committedReadMissingOffsetPolicy is null");
         return this;
     }
 }

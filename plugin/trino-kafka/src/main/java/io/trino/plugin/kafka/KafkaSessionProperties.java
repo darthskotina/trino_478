@@ -16,24 +16,47 @@ package io.trino.plugin.kafka;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.session.PropertyMetadata;
 
 import java.util.List;
+import java.util.Optional;
+
+import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static io.trino.spi.session.PropertyMetadata.stringProperty;
+import static java.lang.String.format;
 
 public final class KafkaSessionProperties
         implements SessionPropertiesProvider
 {
     private static final String TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED = "timestamp_upper_bound_force_push_down_enabled";
+    private static final String COMMITTED_READ_ENABLED = "committed_read_enabled";
+    private static final String COMMITTED_READ_GROUP_ID = "committed_read_group_id";
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
     public KafkaSessionProperties(KafkaConfig kafkaConfig)
     {
-        sessionProperties = ImmutableList.of(PropertyMetadata.booleanProperty(
-                TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED,
-                "Enable or disable timestamp upper bound push down for topic createTime mode",
-                kafkaConfig.isTimestampUpperBoundPushDownEnabled(), false));
+        sessionProperties = ImmutableList.of(
+                PropertyMetadata.booleanProperty(
+                        TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED,
+                        "Enable or disable timestamp upper bound push down for topic createTime mode",
+                        kafkaConfig.isTimestampUpperBoundPushDownEnabled(), false),
+                PropertyMetadata.booleanProperty(
+                        COMMITTED_READ_ENABLED,
+                        "Enable or disable committed-read mode",
+                        kafkaConfig.isCommittedReadEnabled(), false),
+                stringProperty(
+                        COMMITTED_READ_GROUP_ID,
+                        "Kafka consumer group ID used by committed-read mode",
+                        null,
+                        value -> {
+                            if (value != null && value.isBlank()) {
+                                throw new TrinoException(INVALID_SESSION_PROPERTY, format("Session property '%s' must not be blank", COMMITTED_READ_GROUP_ID));
+                            }
+                        },
+                        false));
     }
 
     @Override
@@ -52,5 +75,23 @@ public final class KafkaSessionProperties
     public static boolean isTimestampUpperBoundPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isCommittedReadEnabled(ConnectorSession session)
+    {
+        return session.getProperty(COMMITTED_READ_ENABLED, Boolean.class);
+    }
+
+    public static Optional<String> getCommittedReadGroupId(ConnectorSession session)
+    {
+        return Optional.ofNullable(session.getProperty(COMMITTED_READ_GROUP_ID, String.class));
+    }
+
+    public static String getRequiredCommittedReadGroupId(ConnectorSession session)
+    {
+        return getCommittedReadGroupId(session)
+                .orElseThrow(() -> new TrinoException(
+                        INVALID_SESSION_PROPERTY,
+                        format("Committed-read mode requires session property '%s' to be set", COMMITTED_READ_GROUP_ID)));
     }
 }

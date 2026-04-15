@@ -27,8 +27,7 @@ Committed-read mode is opt-in and changes read semantics:
 - the connector resumes from Kafka committed offsets for the effective group ID
 - the connector plans at most one data split per partition
 - the connector commits the next offset to read after source split exhaustion
-- commit semantics are split-local and best-effort; they are not whole-query
-  success semantics
+- commit semantics are split-local; they are not whole-query success semantics
 
 ## Properties
 
@@ -98,6 +97,9 @@ The connector:
 - commits only after the source split is locally exhausted
 - commits the next offset to read, not the last emitted offset
 - does not commit on early close or partial split consumption
+- fails the query if the offset commit itself fails
+- fails the query and suppresses commit if a planned offset becomes invalid
+  during execution
 
 Important consequence:
 

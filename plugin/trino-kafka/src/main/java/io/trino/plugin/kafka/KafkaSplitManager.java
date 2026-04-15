@@ -26,7 +26,9 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 
@@ -36,6 +38,7 @@ import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
+import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -43,17 +46,29 @@ public class KafkaSplitManager
         implements ConnectorSplitManager
 {
     private final KafkaConsumerFactory consumerFactory;
+    private final KafkaAdminFactory adminFactory;
     private final KafkaFilterManager kafkaFilterManager;
     private final ContentSchemaProvider contentSchemaProvider;
+    private final KafkaCommittedReadRegistry committedReadRegistry;
     private final int messagesPerSplit;
+    private final KafkaCommittedReadMissingOffsetPolicy missingOffsetPolicy;
 
     @Inject
-    public KafkaSplitManager(KafkaConsumerFactory consumerFactory, KafkaConfig kafkaConfig, KafkaFilterManager kafkaFilterManager, ContentSchemaProvider contentSchemaProvider)
+    public KafkaSplitManager(
+            KafkaConsumerFactory consumerFactory,
+            KafkaAdminFactory adminFactory,
+            KafkaConfig kafkaConfig,
+            KafkaFilterManager kafkaFilterManager,
+            ContentSchemaProvider contentSchemaProvider,
+            KafkaCommittedReadRegistry committedReadRegistry)
     {
         this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
+        this.adminFactory = requireNonNull(adminFactory, "adminFactory is null");
         this.messagesPerSplit = kafkaConfig.getMessagesPerSplit();
         this.kafkaFilterManager = requireNonNull(kafkaFilterManager, "kafkaFilterManager is null");
         this.contentSchemaProvider = requireNonNull(contentSchemaProvider, "contentSchemaProvider is null");
+        this.committedReadRegistry = requireNonNull(committedReadRegistry, "committedReadRegistry is null");
+        this.missingOffsetPolicy = requireNonNull(kafkaConfig.getCommittedReadMissingOffsetPolicy(), "missingOffsetPolicy is null");
     }
 
     @Override
@@ -65,6 +80,11 @@ public class KafkaSplitManager
             Constraint constraint)
     {
         KafkaTableHandle kafkaTableHandle = (KafkaTableHandle) table;
+        boolean committedReadMode = KafkaSessionProperties.isCommittedReadEnabled(session);
+        Optional<String> committedReadGroupId = committedReadMode ? Optional.of(KafkaSessionProperties.getRequiredCommittedReadGroupId(session)) : Optional.empty();
+
+        committedReadGroupId.ifPresent(groupId -> committedReadRegistry.register(session.getQueryId(), groupId, kafkaTableHandle.topicName()));
+
         try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.create(session)) {
             List<PartitionInfo> partitionInfos = kafkaConsumer.partitionsFor(kafkaTableHandle.topicName());
 
@@ -74,8 +94,10 @@ public class KafkaSplitManager
 
             Map<TopicPartition, Long> partitionBeginOffsets = kafkaConsumer.beginningOffsets(topicPartitions);
             Map<TopicPartition, Long> partitionEndOffsets = kafkaConsumer.endOffsets(topicPartitions);
+            Map<TopicPartition, Long> partitionLogStartOffsets = partitionBeginOffsets;
+            Map<TopicPartition, Long> partitionLogEndOffsets = partitionEndOffsets;
             KafkaFilteringResult kafkaFilteringResult = kafkaFilterManager.getKafkaFilterResult(session, kafkaTableHandle,
-                    partitionInfos, partitionBeginOffsets, partitionEndOffsets);
+                    partitionInfos, partitionBeginOffsets, partitionEndOffsets, committedReadMode);
             partitionInfos = kafkaFilteringResult.partitionInfos();
             partitionBeginOffsets = kafkaFilteringResult.partitionBeginOffsets();
             partitionEndOffsets = kafkaFilteringResult.partitionEndOffsets();
@@ -83,22 +105,48 @@ public class KafkaSplitManager
             ImmutableList.Builder<KafkaSplit> splits = ImmutableList.builder();
             Optional<String> keyDataSchemaContents = contentSchemaProvider.getKey(kafkaTableHandle);
             Optional<String> messageDataSchemaContents = contentSchemaProvider.getMessage(kafkaTableHandle);
+            Map<TopicPartition, OffsetAndMetadata> committedOffsets = committedReadGroupId
+                    .map(groupId -> getCommittedOffsets(session, groupId))
+                    .orElse(Map.of());
 
             for (PartitionInfo partitionInfo : partitionInfos) {
                 TopicPartition topicPartition = toTopicPartition(partitionInfo);
                 HostAddress leader = HostAddress.fromParts(partitionInfo.leader().host(), partitionInfo.leader().port());
-                new Range(partitionBeginOffsets.get(topicPartition), partitionEndOffsets.get(topicPartition))
-                        .partition(messagesPerSplit).stream()
-                        .map(range -> new KafkaSplit(
-                                kafkaTableHandle.topicName(),
-                                kafkaTableHandle.keyDataFormat(),
-                                kafkaTableHandle.messageDataFormat(),
-                                keyDataSchemaContents,
-                                messageDataSchemaContents,
-                                partitionInfo.partition(),
-                                range,
-                                leader))
-                        .forEach(splits::add);
+                if (!committedReadMode) {
+                    new Range(partitionBeginOffsets.get(topicPartition), partitionEndOffsets.get(topicPartition))
+                            .partition(messagesPerSplit).stream()
+                            .map(range -> new KafkaSplit(
+                                    kafkaTableHandle.topicName(),
+                                    kafkaTableHandle.keyDataFormat(),
+                                    kafkaTableHandle.messageDataFormat(),
+                                    keyDataSchemaContents,
+                                    messageDataSchemaContents,
+                                    partitionInfo.partition(),
+                                    range,
+                                    Optional.empty(),
+                                    leader))
+                            .forEach(splits::add);
+                    continue;
+                }
+
+                SplitPlanningResult splitPlanningResult = planCommittedReadSplit(
+                        kafkaTableHandle,
+                        topicPartition,
+                        partitionLogStartOffsets.get(topicPartition),
+                        partitionLogEndOffsets.get(topicPartition),
+                        partitionEndOffsets.get(topicPartition),
+                        committedReadGroupId.orElseThrow(),
+                        committedOffsets.get(topicPartition));
+                splitPlanningResult.split().ifPresent(rangeAndMetadata -> splits.add(new KafkaSplit(
+                        kafkaTableHandle.topicName(),
+                        kafkaTableHandle.keyDataFormat(),
+                        kafkaTableHandle.messageDataFormat(),
+                        keyDataSchemaContents,
+                        messageDataSchemaContents,
+                        partitionInfo.partition(),
+                        rangeAndMetadata.range(),
+                        Optional.of(rangeAndMetadata.metadata()),
+                        leader)));
             }
             return new FixedSplitSource(splits.build());
         }
@@ -113,5 +161,117 @@ public class KafkaSplitManager
     private static TopicPartition toTopicPartition(PartitionInfo partitionInfo)
     {
         return new TopicPartition(partitionInfo.topic(), partitionInfo.partition());
+    }
+
+    private Map<TopicPartition, OffsetAndMetadata> getCommittedOffsets(ConnectorSession session, String groupId)
+    {
+        try (Admin admin = adminFactory.create(session)) {
+            return admin.listConsumerGroupOffsets(groupId)
+                    .partitionsToOffsetAndMetadata()
+                    .get();
+        }
+        catch (Exception e) {
+            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to fetch committed offsets for group ID '%s'", groupId), e);
+        }
+    }
+
+    private SplitPlanningResult planCommittedReadSplit(
+            KafkaTableHandle tableHandle,
+            TopicPartition topicPartition,
+            long logStart,
+            long logEnd,
+            long filteredEnd,
+            String groupId,
+            OffsetAndMetadata committedOffsetMetadata)
+    {
+        CommittedOffsetResolution resolution = resolveCommittedOffset(tableHandle, topicPartition, logStart, logEnd, groupId, committedOffsetMetadata);
+        long start = min(filteredEnd, resolution.committedBase());
+        long end = filteredEnd;
+
+        if (start < end) {
+            return new SplitPlanningResult(Optional.of(new SplitRangeAndMetadata(
+                    new Range(start, end),
+                    new KafkaCommittedReadSplitMetadata(groupId, false, end))));
+        }
+        if (resolution.missingOrInvalid() && resolution.appliedPolicy().orElse(null) == KafkaCommittedReadMissingOffsetPolicy.LATEST) {
+            return new SplitPlanningResult(Optional.of(new SplitRangeAndMetadata(
+                    new Range(start, end),
+                    new KafkaCommittedReadSplitMetadata(groupId, true, start))));
+        }
+        return new SplitPlanningResult(Optional.empty());
+    }
+
+    private CommittedOffsetResolution resolveCommittedOffset(
+            KafkaTableHandle tableHandle,
+            TopicPartition topicPartition,
+            long logStart,
+            long logEnd,
+            String groupId,
+            OffsetAndMetadata committedOffsetMetadata)
+    {
+        if (committedOffsetMetadata != null) {
+            long committedOffset = committedOffsetMetadata.offset();
+            if (committedOffset >= logStart && committedOffset <= logEnd) {
+                return new CommittedOffsetResolution(committedOffset, false, Optional.empty());
+            }
+            if (missingOffsetPolicy == KafkaCommittedReadMissingOffsetPolicy.ERROR) {
+                throw new TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format(
+                                "Committed offset %s for topic '%s' partition %s and group ID '%s' is outside the current broker range [%s, %s]",
+                                committedOffset,
+                                tableHandle.topicName(),
+                                topicPartition.partition(),
+                                groupId,
+                                logStart,
+                                logEnd));
+            }
+            return new CommittedOffsetResolution(applyMissingOffsetPolicy(logStart, logEnd), true, Optional.of(missingOffsetPolicy));
+        }
+
+        if (missingOffsetPolicy == KafkaCommittedReadMissingOffsetPolicy.ERROR) {
+            throw new TrinoException(
+                    KAFKA_SPLIT_ERROR,
+                    format(
+                            "No committed offset found for topic '%s' partition %s and group ID '%s'",
+                            tableHandle.topicName(),
+                            topicPartition.partition(),
+                            groupId));
+        }
+        return new CommittedOffsetResolution(applyMissingOffsetPolicy(logStart, logEnd), true, Optional.of(missingOffsetPolicy));
+    }
+
+    private long applyMissingOffsetPolicy(long logStart, long logEnd)
+    {
+        return switch (missingOffsetPolicy) {
+            case EARLIEST -> logStart;
+            case LATEST -> logEnd;
+            case ERROR -> throw new IllegalStateException("ERROR policy should be handled before applying it");
+        };
+    }
+
+    private record CommittedOffsetResolution(long committedBase, boolean missingOrInvalid, Optional<KafkaCommittedReadMissingOffsetPolicy> appliedPolicy)
+    {
+        private CommittedOffsetResolution
+        {
+            requireNonNull(appliedPolicy, "appliedPolicy is null");
+        }
+    }
+
+    private record SplitPlanningResult(Optional<SplitRangeAndMetadata> split)
+    {
+        private SplitPlanningResult
+        {
+            requireNonNull(split, "split is null");
+        }
+    }
+
+    private record SplitRangeAndMetadata(Range range, KafkaCommittedReadSplitMetadata metadata)
+    {
+        private SplitRangeAndMetadata
+        {
+            requireNonNull(range, "range is null");
+            requireNonNull(metadata, "metadata is null");
+        }
     }
 }

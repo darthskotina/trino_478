@@ -81,7 +81,8 @@ public class KafkaFilterManager
             KafkaTableHandle kafkaTableHandle,
             List<PartitionInfo> partitionInfos,
             Map<TopicPartition, Long> partitionBeginOffsets,
-            Map<TopicPartition, Long> partitionEndOffsets)
+            Map<TopicPartition, Long> partitionEndOffsets,
+            boolean committedReadMode)
     {
         requireNonNull(session, "session is null");
         requireNonNull(kafkaTableHandle, "kafkaTableHandle is null");
@@ -101,19 +102,28 @@ public class KafkaFilterManager
                             entry -> ((KafkaColumnHandle) entry.getKey()).getName(),
                             Map.Entry::getValue));
 
-            Optional<Range> offsetRanged = getDomain(PARTITION_OFFSET_FIELD, domains)
+            Optional<Domain> offsetDomain = getDomain(PARTITION_OFFSET_FIELD, domains);
+            Optional<Range> offsetRanged = offsetDomain
                     .flatMap(KafkaFilterManager::filterRangeByDomain);
             Set<Long> partitionIdsFiltered = getDomain(PARTITION_ID_FIELD, domains)
                     .map(domain -> filterValuesByDomain(domain, partitionIds))
                     .orElse(partitionIds);
-            Optional<Range> offsetTimestampRanged = getDomain(OFFSET_TIMESTAMP_FIELD, domains)
+            Optional<Domain> offsetTimestampDomain = getDomain(OFFSET_TIMESTAMP_FIELD, domains);
+            Optional<Range> offsetTimestampRanged = offsetTimestampDomain
                     .flatMap(KafkaFilterManager::filterRangeByDomain);
+
+            if (committedReadMode) {
+                offsetDomain.ifPresent(domain -> validateCommittedReadOffsetPredicate(kafkaTableHandle.topicName(), domain));
+                offsetTimestampDomain.ifPresent(domain -> validateCommittedReadTimestampPredicate(session, kafkaTableHandle.topicName(), domain));
+            }
 
             // push down offset
             if (offsetRanged.isPresent()) {
                 Range range = offsetRanged.get();
-                partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets,
-                        partition -> (range.begin() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.begin()) : Optional.empty());
+                if (!committedReadMode) {
+                    partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets,
+                            partition -> (range.begin() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.begin()) : Optional.empty());
+                }
                 partitionEndOffsets = overridePartitionEndOffsets(partitionEndOffsets,
                         partition -> (range.end() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.end()) : Optional.empty());
             }
@@ -122,14 +132,14 @@ public class KafkaFilterManager
             if (offsetTimestampRanged.isPresent()) {
                 try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.create(session)) {
                     // filter negative value to avoid java.lang.IllegalArgumentException when using KafkaConsumer offsetsForTimes
-                    if (offsetTimestampRanged.get().begin() > INVALID_KAFKA_RANGE_INDEX) {
+                    if (!committedReadMode && offsetTimestampRanged.get().begin() > INVALID_KAFKA_RANGE_INDEX) {
                         long partitionBeginTimestamp = floorDiv(offsetTimestampRanged.get().begin(), MICROSECONDS_PER_MILLISECOND);
                         Map<TopicPartition, Long> partitionBeginTimestamps = partitionBeginOffsets.entrySet().stream()
                                 .collect(toMap(Map.Entry::getKey, _ -> partitionBeginTimestamp));
                         Map<TopicPartition, Optional<Long>> beginOffsets = findOffsetsForTimestampGreaterOrEqual(kafkaConsumer, partitionBeginTimestamps);
                         partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets, beginOffsets::get);
                     }
-                    if (isTimestampUpperBoundPushdownEnabled(session, kafkaTableHandle.topicName())) {
+                    if (isTimestampUpperBoundPushdownEnabled(session, kafkaTableHandle.topicName(), committedReadMode)) {
                         if (offsetTimestampRanged.get().end() > INVALID_KAFKA_RANGE_INDEX) {
                             long partitionEndTimestamp = floorDiv(offsetTimestampRanged.get().end(), MICROSECONDS_PER_MILLISECOND);
                             Map<TopicPartition, Long> partitionEndTimestamps = partitionEndOffsets.entrySet().stream()
@@ -156,7 +166,38 @@ public class KafkaFilterManager
         return Optional.ofNullable(columnNameToDomain.get(columnName));
     }
 
-    private boolean isTimestampUpperBoundPushdownEnabled(ConnectorSession session, String topic)
+    private void validateCommittedReadOffsetPredicate(String topic, Domain domain)
+    {
+        if (hasLowerBound(domain)) {
+            throw new TrinoException(
+                    KAFKA_SPLIT_ERROR,
+                    format("Committed-read mode does not allow lower-bound predicates on '_partition_offset' for topic '%s'", topic));
+        }
+    }
+
+    private void validateCommittedReadTimestampPredicate(ConnectorSession session, String topic, Domain domain)
+    {
+        if (hasLowerBound(domain)) {
+            throw new TrinoException(
+                    KAFKA_SPLIT_ERROR,
+                    format("Committed-read mode does not allow lower-bound predicates on '_timestamp' for topic '%s'", topic));
+        }
+        if (hasUpperBound(domain) && !isTopicLogAppendTime(session, topic)) {
+            throw new TrinoException(
+                    KAFKA_SPLIT_ERROR,
+                    format("Committed-read mode allows '_timestamp' upper bounds only for LogAppendTime topics. Topic '%s' does not use LogAppendTime", topic));
+        }
+    }
+
+    private boolean isTimestampUpperBoundPushdownEnabled(ConnectorSession session, String topic, boolean committedReadMode)
+    {
+        if (committedReadMode) {
+            return isTopicLogAppendTime(session, topic);
+        }
+        return isTopicLogAppendTime(session, topic) || KafkaSessionProperties.isTimestampUpperBoundPushdownEnabled(session);
+    }
+
+    private boolean isTopicLogAppendTime(ConnectorSession session, String topic)
     {
         try (Admin adminClient = adminFactory.create(session)) {
             ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
@@ -175,7 +216,7 @@ public class KafkaFilterManager
         catch (Exception e) {
             throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to get configuration for topic '%s'", topic), e);
         }
-        return KafkaSessionProperties.isTimestampUpperBoundPushdownEnabled(session);
+        return false;
     }
 
     private static Map<TopicPartition, Optional<Long>> findOffsetsForTimestampGreaterOrEqual(KafkaConsumer<byte[], byte[]> kafkaConsumer, Map<TopicPartition, Long> timestamps)
@@ -298,5 +339,31 @@ public class KafkaFilterManager
             return 1000;
         }
         throw new IllegalArgumentException("Unsupported type: " + type);
+    }
+
+    private static boolean hasLowerBound(Domain domain)
+    {
+        if (domain.isSingleValue()) {
+            return true;
+        }
+        ValueSet valueSet = domain.getValues();
+        if (valueSet instanceof SortedRangeSet sortedRangeSet) {
+            return sortedRangeSet.getRanges().getOrderedRanges().stream()
+                    .anyMatch(range -> range.getLowValue().isPresent());
+        }
+        return false;
+    }
+
+    private static boolean hasUpperBound(Domain domain)
+    {
+        if (domain.isSingleValue()) {
+            return true;
+        }
+        ValueSet valueSet = domain.getValues();
+        if (valueSet instanceof SortedRangeSet sortedRangeSet) {
+            return sortedRangeSet.getRanges().getOrderedRanges().stream()
+                    .anyMatch(range -> range.getHighValue().isPresent());
+        }
+        return false;
     }
 }

@@ -70,16 +70,19 @@ public class KafkaMetadata
     private final boolean hideInternalColumns;
     private final TableDescriptionSupplier tableDescriptionSupplier;
     private final KafkaInternalFieldManager kafkaInternalFieldManager;
+    private final KafkaCommittedReadRegistry committedReadRegistry;
 
     @Inject
     public KafkaMetadata(
             KafkaConfig kafkaConfig,
             TableDescriptionSupplier tableDescriptionSupplier,
-            KafkaInternalFieldManager kafkaInternalFieldManager)
+            KafkaInternalFieldManager kafkaInternalFieldManager,
+            KafkaCommittedReadRegistry committedReadRegistry)
     {
         this.hideInternalColumns = kafkaConfig.isHideInternalColumns();
         this.tableDescriptionSupplier = requireNonNull(tableDescriptionSupplier, "tableDescriptionSupplier is null");
         this.kafkaInternalFieldManager = requireNonNull(kafkaInternalFieldManager, "kafkaInternalFieldManager is null");
+        this.committedReadRegistry = requireNonNull(committedReadRegistry, "committedReadRegistry is null");
     }
 
     @Override
@@ -276,6 +279,12 @@ public class KafkaMetadata
     private Optional<KafkaTopicDescription> getTopicDescription(ConnectorSession session, SchemaTableName schemaTableName)
     {
         return tableDescriptionSupplier.getTopicDescription(session, schemaTableName);
+    }
+
+    @Override
+    public void cleanupQuery(ConnectorSession session)
+    {
+        committedReadRegistry.cleanupQuery(session.getQueryId());
     }
 
     @Override

@@ -64,6 +64,7 @@ public class KafkaConnectorModule
         binder.bind(KafkaInternalFieldManager.class).in(Scopes.SINGLETON);
         binder.bind(KafkaSessionProperties.class).in(Scopes.SINGLETON);
         binder.bind(KafkaFilterManager.class).in(Scopes.SINGLETON);
+        binder.bind(KafkaCommittedReadRegistry.class).in(Scopes.SINGLETON);
 
         configBinder(binder).bindConfig(KafkaConfig.class);
         bindTopicSchemaProviderModule(FileTableDescriptionSupplier.NAME, new FileTableDescriptionSupplierModule());

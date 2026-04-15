@@ -43,7 +43,10 @@ public class TestKafkaConfig
                 .setMessagesPerSplit(100_000)
                 .setTimestampUpperBoundPushDownEnabled(false)
                 .setResourceConfigFiles(List.of())
-                .setInternalFieldPrefix("_"));
+                .setInternalFieldPrefix("_")
+                .setConsumerGroupId("bigdata-spark-streaming")
+                .setCommittedReadEnabled(false)
+                .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.ERROR));
     }
 
     @Test
@@ -63,6 +66,9 @@ public class TestKafkaConfig
                 .put("kafka.timestamp-upper-bound-force-push-down-enabled", "true")
                 .put("kafka.config.resources", resource1.toString() + "," + resource2.toString())
                 .put("kafka.internal-column-prefix", "the_most_unexpected_prefix_")
+                .put("kafka.consumer-group-id", "legacy-read-group")
+                .put("kafka.committed-read-enabled", "true")
+                .put("kafka.committed-read-missing-offset-policy", "LATEST")
                 .buildOrThrow();
 
         KafkaConfig expected = new KafkaConfig()
@@ -74,7 +80,10 @@ public class TestKafkaConfig
                 .setMessagesPerSplit(1)
                 .setTimestampUpperBoundPushDownEnabled(true)
                 .setResourceConfigFiles(ImmutableList.of(resource1.toString(), resource2.toString()))
-                .setInternalFieldPrefix("the_most_unexpected_prefix_");
+                .setInternalFieldPrefix("the_most_unexpected_prefix_")
+                .setConsumerGroupId("legacy-read-group")
+                .setCommittedReadEnabled(true)
+                .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.LATEST);
 
         assertFullMapping(properties, expected);
     }
