@@ -21,10 +21,11 @@ This plan is intentionally limited to implementation planning. It does not inclu
 - One data split per Kafka partition when committed-read mode is enabled, plus an optional checkpoint-only split for `LATEST` initialization
 - Start position resolution from Kafka committed offsets for the effective committed-read group ID
 - Commit of the next offset after source split exhaustion
+- Explicit split metadata for checkpoint-only committed-read execution
 - Catalog properties for committed-read mode
 - Session properties for per-query/per-session committed-read mode and required group ID override
 - Tests that verify offsets were committed on Kafka's side
-- Documentation updates for the new behavior and caveats
+- Documentation updates for the new behavior and caveats, including a modified-connector README or equivalent operator-facing document
 
 ### Out of Scope
 
@@ -33,6 +34,7 @@ This plan is intentionally limited to implementation planning. It does not inclu
 - Kafka `subscribe(...)` / rebalance-based group management
 - Multi-split-per-partition ordered checkpointing
 - Backward reads in committed-read mode as a first-class feature
+- Kafka transactional visibility semantics such as `isolation.level=read_committed`
 - Any Trino SPI or engine changes outside the Kafka connector unless an unexpected blocker is discovered
 
 ## Current Behavior Summary
@@ -66,10 +68,12 @@ When committed-read mode is enabled:
 - the connector plans at most one data-carrying split per Kafka partition
 - the scan start offset is derived from the effective committed-read group ID and the current bounded query snapshot
 - the scan end offset remains the partition end snapshot determined during split planning
+- committed progress is defined relative to the query's effective pushed-down bounds
+- lower-bound predicates on `_partition_offset` and `_timestamp` may intentionally advance the committed resume position past earlier unread records for that group
 - messages produced after split planning are not read or committed by that query
 - the connector commits the next offset to read after source split exhaustion
 
-When the effective committed offset is missing or invalid and the configured policy is `LATEST`, the connector may also plan a checkpoint-only split that emits no rows and exists only to persist the initial resume point.
+When the effective committed offset is missing or invalid and the configured policy is `LATEST`, the connector may also plan a checkpoint-only split that emits no rows and exists only to persist the resolved initial resume point after applying the same pushed-down bounds.
 
 This is a best-effort per-split completion model, not a whole-query commit barrier.
 
@@ -129,6 +133,7 @@ For each partition in committed-read mode:
 - `logEnd` = current broker end offset snapshot
 - `filteredBegin` and `filteredEnd` = the existing pushdown-adjusted bounds after applying current offset/timestamp/partition filters
 - `committedBase` = valid committed offset if present, otherwise the result of the missing-offset policy
+- `checkpointCommitTarget` = defined only for checkpoint-only `LATEST` initialization, and equals the final clamped empty-range position after applying the same pushed-down bounds; in that branch `start == end == checkpointCommitTarget`
 
 The final split range is:
 
@@ -139,9 +144,11 @@ Implications:
 
 - pushed-down lower and upper bounds always apply
 - committed offsets never bypass query predicates
-- a valid existing committed offset must never be moved backwards by a query whose filtered end is lower than that committed offset
+- committed-read mode tracks progress relative to the effective pushed-down bounds of the query
+- lower-bound predicates on `_partition_offset` and `_timestamp` may advance committed progress past earlier unread records; this is intentional for tracked filtered-consumption use cases
+- the planner must not generate a split that rewinds a valid existing committed offset solely because a query's filtered end is lower than that committed offset
 - if `start == end` because the partition already has a valid committed offset at or beyond `end`, the partition produces no split and no commit
-- if `start == end` because the committed offset is missing or invalid and the policy is `LATEST`, the connector plans a checkpoint-only split that emits no rows and commits the resolved `committedBase`
+- if `start == end` because the committed offset is missing or invalid and the policy is `LATEST`, the connector plans a checkpoint-only split that emits no rows and commits the resolved clamped `checkpointCommitTarget`, not raw `committedBase`
 - for other `start == end` cases, the partition produces no split and no commit
 
 ### 4. Commit Semantics
@@ -153,12 +160,12 @@ For a committed-read split:
 - commit only if the cursor naturally exhausts its planned `[start, end)` range
 - commit only from cursor close after the split is marked fully consumed
 - commit the exact next offset to read for a data-carrying split: `split.messagesRange.end()`
-- commit the resolved `committedBase` for a checkpoint-only `LATEST` initialization split
+- commit the resolved clamped checkpoint target for a checkpoint-only `LATEST` initialization split
 - never derive the commit target from `consumer.position()`
 - do not commit on early close or local read failure before the connector has locally exhausted the split
 - query-level short-circuit such as `LIMIT` may still allow Trino to drain a small split into a page before the query stops; if local split exhaustion has already happened, commit is expected
 - do not commit from partial-consumption paths that stop before local split exhaustion
-- never commit a value lower than an already valid committed offset
+- same-group concurrent writers remain last-writer-wins at Kafka's offset store, so no hard guarantee is made against backward movement under unsupported concurrent use; at most, the connector may perform a best-effort stale-state check before commit
 
 This contract avoids partial-consumption commits, but it does not provide whole-query atomicity.
 
@@ -195,7 +202,7 @@ Reasoning:
 - Kafka stores one committed offset per topic-partition per group
 - the current connector can create many Trino splits per partition
 - committing progress from many parallel splits against one Kafka partition would create offset races
-- a checkpoint-only split is acceptable for `LATEST` initialization because it still preserves the one-split-per-partition write discipline
+- a checkpoint-only split is acceptable for `LATEST` initialization because it still preserves the one-split-per-partition write discipline when represented explicitly rather than inferred from an empty range
 
 Trade-off:
 
@@ -239,6 +246,7 @@ Unsafe shapes that must be documented as unsupported:
 - self-joins or repeated scans of the same tracked topic within one query when they share a group ID
 - external Kafka consumers using the same group ID while Trino committed-read mode is active
 - any workload that assumes Kafka consumer-group rebalancing or partition ownership enforcement
+- workloads that require transactional visibility semantics from Kafka; this feature intentionally does not change `isolation.level`
 
 ## Implementation Plan
 
@@ -304,7 +312,18 @@ When committed-read mode is enabled:
 - look up committed offsets for the effective committed-read group ID
 - resolve final `[start, end)` using the exact formula defined above
 - plan one data split per partition only when `start < end`
-- if `start == end` and the offset state was missing or invalid and the policy is `LATEST`, plan a checkpoint-only split carrying commit target `committedBase`
+- if `start == end` and the offset state was missing or invalid and the policy is `LATEST`, plan a checkpoint-only split carrying the explicit clamped `checkpointCommitTarget`
+
+### 2.1.1 Extend `KafkaSplit` for Explicit Checkpoint Metadata
+
+Do not infer checkpoint-only behavior from `messagesRange.begin() == messagesRange.end()`.
+
+Extend `KafkaSplit` with explicit committed-read execution metadata, at minimum:
+
+- whether the split is checkpoint-only
+- the explicit checkpoint commit target for checkpoint-only splits
+
+This metadata is connector-local and keeps the worker-side read path simple and unambiguous.
 
 ### 2.2 Fetch Committed Offsets from Kafka Admin APIs
 
@@ -323,7 +342,7 @@ For each partition:
 - if the committed offset is outside `[logStart, logEnd]`, treat it as invalid and apply the same policy
 - if the policy is `ERROR`, fail the query with a message that identifies the topic, partition, group ID, and invalid or missing condition
 - if the policy is `LATEST` and the partition resolves to an empty range, distinguish between durable initialization and no-op cases:
-  - missing/invalid offset plus `LATEST`: checkpoint-only split
+  - missing/invalid offset plus `LATEST`: checkpoint-only split whose explicit commit target is the final clamped empty-range position, not raw `logEnd`
   - already valid committed offset at or beyond `end`: no split and no commit
 
 ## Phase 3: Consumer Startup and Commit Behavior
@@ -377,14 +396,15 @@ Use Kafka commit APIs in the conventional way:
 - commit `split.messagesRange.end()` exactly
 - commit only the single topic-partition being scanned
 - use synchronous commit so failures are surfaced to the query
-- for checkpoint-only `LATEST` initialization splits, commit the explicit checkpoint target instead of `split.messagesRange.end()`
+- for checkpoint-only `LATEST` initialization splits, commit the explicit clamped checkpoint target instead of `split.messagesRange.end()`
 
 Do not:
 
 - commit `consumer.position()`
+- commit raw `committedBase` for checkpoint-only `LATEST` initialization
 - commit from partial-consumption paths
 - swallow commit failures
-- move a valid committed offset backwards
+- claim a hard no-backwards guarantee under unsupported same-group concurrency
 
 ### 3.5 Handle Runtime Offset Invalidation Explicitly
 
@@ -405,6 +425,7 @@ The feature provides:
 - resume from committed offsets on subsequent committed-read runs
 - no commit on early close or partial split consumption
 - durable initial checkpointing for missing/invalid `LATEST` offsets
+- explicit checkpoint-only execution semantics via split metadata rather than empty-range inference
 
 ### 4.2 Explicit Non-Guarantees
 
@@ -415,11 +436,13 @@ The feature does not claim:
 - commit-on-query-success semantics
 - safe concurrent use of the same group ID on the same tracked topic
 - Kafka consumer-group membership, partition ownership, or rebalance coordination
+- Kafka transactional visibility guarantees such as `isolation.level=read_committed`
 
 Important consequence:
 
 - a partition may commit progress after its split is fully consumed even if the overall query later fails elsewhere
 - a small split may still commit even when the query contains `LIMIT`, if Trino has already locally exhausted that split before the query stops
+- unsupported same-group concurrency can still overwrite a newer committed offset with an older one because Kafka offset commits are not compare-and-set
 
 ### 4.3 Documentation Caveats
 
@@ -433,6 +456,10 @@ Document that:
 - default mode can still read offsets earlier than a group's committed offset because it uses explicit planning and `seek(...)`, not committed-read resume behavior
 - same-group Trino queries are not coordinated through Kafka consumer-group membership
 - `LIMIT` is not a reliable no-commit signal for small committed-read splits
+- committed-read mode tracks progress relative to effective pushed-down bounds, so lower-bound predicates on `_partition_offset` and `_timestamp` may intentionally skip earlier unread records for that group
+- checkpoint-only `LATEST` initialization commits the final clamped empty-range position rather than raw broker `logEnd`
+- this feature does not change Kafka transactional visibility; `isolation.level=read_committed` remains out of scope in this iteration
+- these trade-offs must be described in a modified-connector README or equivalent operator-facing document, not only in connector reference docs
 
 ## Phase 5: Test Plan
 
@@ -515,6 +542,7 @@ This is the primary negative-path test only when the split is guaranteed to rema
 - configure `LATEST`
 - verify the first run starts from the partition end snapshot and reads nothing historical
 - verify Kafka stores the initial checkpoint for that group even when the split emits no rows
+- when an upper-bound predicate reduces `filteredEnd` below broker `logEnd`, verify the checkpoint commits the final clamped empty-range position rather than raw `logEnd`
 
 #### Test 9: Missing Offset Policy `ERROR`
 
@@ -578,6 +606,9 @@ Update Kafka connector docs to describe:
 - failure behavior when lookup or commit fails
 - runtime failure behavior when planned offsets become invalid before execution
 - limitations and concurrency caveats
+- the accepted lower-bound pushdown trade-off for committed progress
+- the explicit exclusion of Kafka transactional visibility semantics such as `read_committed`
+- the modified-connector README or equivalent operator-facing document that captures these accepted trade-offs
 
 ## Proposed Implementation Order
 
@@ -585,11 +616,12 @@ Update Kafka connector docs to describe:
 2. Add committed-read config model and session-property model
 3. Add effective settings resolution helpers
 4. Add committed-offset lookup and exact split-range resolution
-5. Update split planning to one data split per partition plus `LATEST` checkpoint-only initialization when required
-6. Add split-local exhaustion tracking and exact commit-target behavior
-7. Add failure propagation for committed-offset lookup, runtime offset invalidation, and commit
-8. Add Kafka-side test helpers and deterministic tests
-9. Update connector documentation
+5. Extend split metadata for explicit checkpoint-only execution and clamped checkpoint commit targets
+6. Update split planning to one data split per partition plus `LATEST` checkpoint-only initialization when required
+7. Add split-local exhaustion tracking and exact commit-target behavior
+8. Add failure propagation for committed-offset lookup, runtime offset invalidation, and commit
+9. Add Kafka-side test helpers and deterministic tests
+10. Update connector documentation and modified-connector README
 
 ## Acceptance Criteria
 
@@ -608,4 +640,6 @@ The feature is ready for implementation review when all of the following are tru
 - committed-offset lookup failures and commit failures fail the query
 - runtime offset invalidation fails the query and suppresses commit
 - rerunning with the same group resumes from committed offsets
-- docs explain the feature and its limitations clearly
+- checkpoint-only `LATEST` initialization commits the final clamped empty-range position rather than raw `committedBase` or raw broker `logEnd`
+- checkpoint-only behavior is represented explicitly in split metadata rather than inferred from an empty range
+- docs and the modified-connector README explain the feature, its intentional lower-bound pushdown trade-off, and its non-goals clearly
