@@ -5,8 +5,9 @@
 Add an opt-in committed-read mode to the Trino Kafka connector that:
 
 - reads from Kafka consumer-group committed offsets
+- preserves Kafka-like resume semantics by refusing predicate shapes that would advance a group's stored position past unread records
 - processes at most one Trino split per Kafka partition in that mode, with an optional checkpoint-only split for `LATEST` initialization
-- commits the next safe offset after source split exhaustion
+- commits the next safe offset after source split exhaustion, not after whole-query success
 - allows the committed-read consumer group ID to be overridden at session scope
 - preserves current behavior as the default mode
 
@@ -48,7 +49,7 @@ The connector currently behaves like a bounded table scan over Kafka:
 
 There is already a `kafka.consumer-group-id` catalog property in the plugin, but today it does not produce committed-read semantics on reads.
 
-The current branch also gives `kafka.consumer-group-id` a hardcoded default value in `KafkaConfig`. That legacy default must not be used as an implicit committed-read group.
+The current branch also gives `kafka.consumer-group-id` a hardcoded default value in `KafkaConfig`. That legacy property and default remain for compatibility in default mode, but they must not be used as an implicit committed-read group.
 
 ## Intended Semantics
 
@@ -68,8 +69,8 @@ When committed-read mode is enabled:
 - the connector plans at most one data-carrying split per Kafka partition
 - the scan start offset is derived from the effective committed-read group ID and the current bounded query snapshot
 - the scan end offset remains the partition end snapshot determined during split planning
-- committed progress is defined relative to the query's effective pushed-down bounds
-- lower-bound predicates on `_partition_offset` and `_timestamp` may intentionally advance the committed resume position past earlier unread records for that group
+- the connector preserves consumer-group resume semantics and therefore rejects lower-bound predicates on `_partition_offset` and `_timestamp`
+- `_timestamp` upper bounds are allowed only when they can be enforced safely for committed progress, which in this iteration means topics using `LogAppendTime`
 - messages produced after split planning are not read or committed by that query
 - the connector commits the next offset to read after source split exhaustion
 
@@ -88,7 +89,7 @@ Committed-read mode uses the following properties:
 - Session `committed_read_enabled`
 - Session `committed_read_group_id`
 
-The existing `kafka.consumer-group-id` property remains unchanged for legacy/default-mode consumer construction, but it is not consulted in committed-read mode.
+The existing `kafka.consumer-group-id` property and its current hardcoded default remain unchanged for legacy/default-mode consumer construction compatibility, but they are not consulted in committed-read mode.
 
 Effective committed-read mode resolution:
 
@@ -106,7 +107,9 @@ Rules:
 - if committed-read mode is enabled and the session `committed_read_group_id` is blank or absent, fail the query
 - the committed-read group ID must be explicitly provided at session scope
 - the legacy `kafka.consumer-group-id` property must never be used as a fallback committed-read group
-- the committed-read group ID properties do not alter default-mode behavior
+- the committed-read group ID properties are only consulted in committed-read mode and do not alter default-mode behavior
+- separate sessions may use different committed-read group IDs concurrently within the same catalog
+- a single query has one effective committed-read group ID across all scans in that session
 
 ### 2. Missing or Invalid Committed Offset Policy
 
@@ -131,23 +134,29 @@ For each partition in committed-read mode:
 
 - `logStart` = current broker beginning offset snapshot
 - `logEnd` = current broker end offset snapshot
-- `filteredBegin` and `filteredEnd` = the existing pushdown-adjusted bounds after applying current offset/timestamp/partition filters
+- `filteredEnd` = the existing pushdown-adjusted upper bound after applying current partition filters, supported `_partition_offset` upper bounds, and supported `_timestamp` upper bounds
 - `committedBase` = valid committed offset if present, otherwise the result of the missing-offset policy
 - `checkpointCommitTarget` = defined only for checkpoint-only `LATEST` initialization, and equals the final clamped empty-range position after applying the same pushed-down bounds; in that branch `start == end == checkpointCommitTarget`
 
+Committed-read predicate compatibility rules:
+
+- lower-bound predicates on `_partition_offset` are rejected
+- lower-bound predicates on `_timestamp` are rejected
+- `_timestamp` upper bounds are rejected unless the topic uses `LogAppendTime`
+
 The final split range is:
 
-- `start = min(filteredEnd, max(filteredBegin, committedBase))`
+- `start = min(filteredEnd, committedBase)`
 - `end = filteredEnd`
 
 Implications:
 
-- pushed-down lower and upper bounds always apply
-- committed offsets never bypass query predicates
-- committed-read mode tracks progress relative to the effective pushed-down bounds of the query
-- lower-bound predicates on `_partition_offset` and `_timestamp` may advance committed progress past earlier unread records; this is intentional for tracked filtered-consumption use cases
+- supported upper bounds always apply
+- lower-bound predicates on `_partition_offset` and `_timestamp` never advance committed progress because they are rejected
+- committed offsets never bypass supported upper-bound predicates
 - the planner must not generate a split that rewinds a valid existing committed offset solely because a query's filtered end is lower than that committed offset
 - if `start == end` because the partition already has a valid committed offset at or beyond `end`, the partition produces no split and no commit
+- if `start == end` because `committedBase >= filteredEnd`, the partition produces no split and no commit
 - if `start == end` because the committed offset is missing or invalid and the policy is `LATEST`, the connector plans a checkpoint-only split that emits no rows and commits the resolved clamped `checkpointCommitTarget`, not raw `committedBase`
 - for other `start == end` cases, the partition produces no split and no commit
 
@@ -248,6 +257,14 @@ Unsafe shapes that must be documented as unsupported:
 - any workload that assumes Kafka consumer-group rebalancing or partition ownership enforcement
 - workloads that require transactional visibility semantics from Kafka; this feature intentionally does not change `isolation.level`
 
+### 6. Repeated Tracked Scans Within One Query Must Fail Fast
+
+To avoid unsafe self-joins or repeated scans sharing one offset namespace:
+
+- during split planning, the coordinator-side Kafka plugin records `(queryId, effectiveGroupId, topicName)` for committed-read scans
+- if the same tuple is registered again within one query, fail the query instead of allowing multiple tracked scans to race against one committed offset
+- implement the guard as connector-local coordinator state with TTL-based cleanup; no Trino SPI or engine change is expected for this mitigation
+
 ## Implementation Plan
 
 ## Phase 1: Configuration and Session Properties
@@ -292,8 +309,10 @@ These helpers must be used consistently across split planning and consumer const
 
 Before feature work starts, reconcile the branch state around `kafka.consumer-group-id`:
 
-- keep the existing property intact
+- keep the existing property intact, including its current hardcoded default value, for compatibility in default mode
 - keep it out of committed-read group resolution entirely
+- make it explicit in docs and tests that `committed_read_group_id` is a new session property used only when committed-read mode is enabled
+- remove incidental branch-only debug logging that is not intended to ship
 - update config tests and docs so the current branch state and the planned committed-read behavior are no longer ambiguous
 
 ## Phase 2: Split Planning Changes
@@ -308,7 +327,11 @@ When committed-read mode is enabled:
 
 - enumerate partitions as today
 - fetch `logStart` and `logEnd` as today
-- apply existing pushdown logic to get `filteredBegin` and `filteredEnd`
+- validate committed-read predicate compatibility before range planning:
+  - reject lower bounds on `_partition_offset`
+  - reject lower bounds on `_timestamp`
+  - reject `_timestamp` upper bounds unless the topic uses `LogAppendTime`
+- apply existing partition and supported upper-bound pushdown logic to get `filteredEnd`
 - look up committed offsets for the effective committed-read group ID
 - resolve final `[start, end)` using the exact formula defined above
 - plan one data split per partition only when `start < end`
@@ -344,6 +367,15 @@ For each partition:
 - if the policy is `LATEST` and the partition resolves to an empty range, distinguish between durable initialization and no-op cases:
   - missing/invalid offset plus `LATEST`: checkpoint-only split whose explicit commit target is the final clamped empty-range position, not raw `logEnd`
   - already valid committed offset at or beyond `end`: no split and no commit
+
+### 2.4 Reject Repeated Tracked Scans Within One Query
+
+During split planning for committed-read mode:
+
+- maintain a connector-local coordinator registry keyed by `(queryId, effectiveGroupId, topicName)`
+- register the key before returning splits
+- if the same key is already registered for the current query, fail the query
+- clean up registry state using query completion hooks when available and TTL-based expiry as a fallback
 
 ## Phase 3: Consumer Startup and Commit Behavior
 
@@ -444,19 +476,34 @@ Important consequence:
 - a small split may still commit even when the query contains `LIMIT`, if Trino has already locally exhausted that split before the query stops
 - unsupported same-group concurrency can still overwrite a newer committed offset with an older one because Kafka offset commits are not compare-and-set
 
-### 4.3 Documentation Caveats
+### 4.3 Retry Policy Requirement
+
+Committed-read mode is intended to run only when Trino system `retry_policy=NONE`.
+
+Plan note:
+
+- this must be documented as an operator requirement
+- the current `ConnectorSession` API exposes catalog session properties, but not Trino system session properties such as `retry_policy`
+- because of that, a hard runtime guard against non-`NONE` retry policy is not available as a pure Kafka-plugin check in the current Trino API surface
+- if hard runtime enforcement is required, treat it as an engine/SPI blocker discovered during implementation
+
+### 4.4 Documentation Caveats
 
 Document that:
 
 - committed-read mode is intended for dedicated tracked-progress use cases
 - ad hoc historical reads should use default mode or a different group ID
 - concurrent queries with the same effective group ID may overwrite each other's progress
-- self-joins and repeated scans of the same tracked topic are unsafe if they share a group ID
+- self-joins and repeated scans of the same tracked topic with the same effective group ID fail fast within one query; cross-query same-group concurrency remains unsupported
 - messages appended after split planning are outside the query snapshot and are not committed by that query
 - default mode can still read offsets earlier than a group's committed offset because it uses explicit planning and `seek(...)`, not committed-read resume behavior
 - same-group Trino queries are not coordinated through Kafka consumer-group membership
 - `LIMIT` is not a reliable no-commit signal for small committed-read splits
-- committed-read mode tracks progress relative to effective pushed-down bounds, so lower-bound predicates on `_partition_offset` and `_timestamp` may intentionally skip earlier unread records for that group
+- lower-bound predicates on `_partition_offset` and `_timestamp` are rejected in committed-read mode so that SQL filters cannot advance a group's stored position past unread records
+- `_timestamp` upper bounds are allowed in committed-read mode only for topics using `LogAppendTime`
+- separate sessions can use different `committed_read_group_id` values concurrently in the same catalog; a single shared session or connection must not be mutated concurrently by multiple clients expecting different group IDs
+- `kafka.consumer-group-id` and its current hardcoded default remain compatibility behavior for default mode only; `committed_read_group_id` is a new session property used only in committed-read mode
+- committed-read mode requires Trino `retry_policy=NONE` in deployment for safe semantics in this iteration
 - checkpoint-only `LATEST` initialization commits the final clamped empty-range position rather than raw broker `logEnd`
 - this feature does not change Kafka transactional visibility; `isolation.level=read_committed` remains out of scope in this iteration
 - these trade-offs must be described in a modified-connector README or equivalent operator-facing document, not only in connector reference docs
@@ -555,25 +602,51 @@ This is the primary negative-path test only when the split is guaranteed to rema
 - create a committed offset that falls outside the current `[logStart, logEnd]` range
 - verify the configured missing-offset policy is applied
 
-#### Test 11: Commit Failure Propagates
+#### Test 11: `_partition_offset` Lower Bound Is Rejected in Committed-Read Mode
+
+- enable committed-read mode
+- add a lower-bound predicate on `_partition_offset`
+- assert the query fails before split planning produces tracked splits
+
+#### Test 12: `_timestamp` Lower Bound Is Rejected in Committed-Read Mode
+
+- enable committed-read mode
+- add a lower-bound predicate on `_timestamp`
+- assert the query fails before split planning produces tracked splits
+
+#### Test 13: `_timestamp` Upper Bound on `CreateTime` Topic Is Rejected
+
+- use a topic whose timestamp mode is `CreateTime`
+- enable committed-read mode
+- add an upper-bound predicate on `_timestamp`
+- assert the query fails instead of silently reading or committing past that SQL bound
+
+#### Test 14: Repeated Scan of Same Topic/Group in One Query Fails Fast
+
+- enable committed-read mode
+- use one effective group ID
+- issue a query shape that scans the same tracked topic twice
+- assert the query fails due to duplicate `(queryId, groupId, topicName)` registration
+
+#### Test 15: Commit Failure Propagates
 
 - add a focused unit or narrowly scoped connector test around the commit path
 - force commit failure deterministically
 - assert the failure surfaces to the query path rather than being swallowed
 
-#### Test 12: Missing Session Group ID Fails
+#### Test 16: Missing Session Group ID Fails
 
 - enable committed-read mode
 - do not set `committed_read_group_id`
 - assert the query fails before split planning proceeds
 
-#### Test 13: Legacy `kafka.consumer-group-id` Is Not Used as Committed-Read Fallback
+#### Test 17: Legacy `kafka.consumer-group-id` Is Not Used as Committed-Read Fallback
 
 - configure a legacy `kafka.consumer-group-id`
 - enable committed-read mode without `committed_read_group_id`
 - assert the query fails instead of silently using the legacy group
 
-#### Test 14: Runtime Offset Invalidation Suppresses Commit
+#### Test 18: Runtime Offset Invalidation Suppresses Commit
 
 - add a focused unit or narrowly scoped connector test around the cursor read path
 - simulate `OffsetOutOfRangeException` after planning but before successful exhaustion
@@ -597,16 +670,22 @@ Update Kafka connector docs to describe:
 - the new catalog properties
 - the new session properties
 - the requirement that committed-read group ID is explicitly set in session scope
+- the fact that `kafka.consumer-group-id` and its hardcoded default remain compatibility behavior for default mode only
 - default mode versus committed-read mode
 - one-split-per-partition behavior in committed-read mode
 - checkpoint-only `LATEST` initialization behavior
 - exact start-offset resolution semantics
+- rejection of lower-bound predicates on `_partition_offset` and `_timestamp` in committed-read mode
+- rejection of `_timestamp` upper bounds in committed-read mode unless the topic uses `LogAppendTime`
 - split-exhaustion commit semantics
+- the fact that split-exhaustion commit semantics are not query-success commit semantics
 - why `LIMIT` is not a reliable no-commit signal for small splits
 - failure behavior when lookup or commit fails
 - runtime failure behavior when planned offsets become invalid before execution
+- fail-fast repeated-scan behavior for the same `(queryId, groupId, topicName)`
 - limitations and concurrency caveats
-- the accepted lower-bound pushdown trade-off for committed progress
+- session-level group ID override behavior within one catalog, including the requirement to use separate sessions for different concurrent group IDs
+- the deployment requirement that Trino `retry_policy=NONE` for committed-read mode in this iteration
 - the explicit exclusion of Kafka transactional visibility semantics such as `read_committed`
 - the modified-connector README or equivalent operator-facing document that captures these accepted trade-offs
 
@@ -615,31 +694,37 @@ Update Kafka connector docs to describe:
 1. Reconcile current `kafka.consumer-group-id` config/test/doc state
 2. Add committed-read config model and session-property model
 3. Add effective settings resolution helpers
-4. Add committed-offset lookup and exact split-range resolution
-5. Extend split metadata for explicit checkpoint-only execution and clamped checkpoint commit targets
-6. Update split planning to one data split per partition plus `LATEST` checkpoint-only initialization when required
-7. Add split-local exhaustion tracking and exact commit-target behavior
-8. Add failure propagation for committed-offset lookup, runtime offset invalidation, and commit
-9. Add Kafka-side test helpers and deterministic tests
-10. Update connector documentation and modified-connector README
+4. Add committed-read predicate validation and committed-offset lookup
+5. Add exact split-range resolution with strict consumer-group semantics
+6. Extend split metadata for explicit checkpoint-only execution and clamped checkpoint commit targets
+7. Add split planning changes for one data split per partition plus `LATEST` checkpoint-only initialization when required
+8. Add repeated-scan guard keyed by `(queryId, groupId, topicName)`
+9. Add split-local exhaustion tracking and exact commit-target behavior
+10. Add failure propagation for committed-offset lookup, runtime offset invalidation, and commit
+11. Add Kafka-side test helpers and deterministic tests
+12. Update connector documentation and modified-connector README, including the `retry_policy=NONE` operational requirement
 
 ## Acceptance Criteria
 
 The feature is ready for implementation review when all of the following are true:
 
 - default connector behavior remains unchanged
-- existing `kafka.consumer-group-id` behavior remains intact for legacy/default-mode behavior and is never used as a committed-read fallback
+- existing `kafka.consumer-group-id` behavior and its current hardcoded default remain intact for legacy/default-mode behavior and are never used as a committed-read fallback
 - committed-read mode is opt-in
 - the effective committed-read group ID can be changed at session scope
 - committed-read mode requires an explicit session `committed_read_group_id`
 - committed-read mode plans one data split per partition, with a checkpoint-only split when needed for missing/invalid `LATEST` initialization
 - start-offset resolution follows the explicit formula in this plan
+- committed-read mode rejects lower-bound predicates on `_partition_offset` and `_timestamp`
+- committed-read mode rejects `_timestamp` upper bounds unless they are safely enforceable for committed progress on `LogAppendTime` topics
 - missing and invalid committed offsets follow the configured policy
 - full source split exhaustion commits the exact planned target offset visible from Kafka
 - early close and partial consumption do not commit unless the split has already been locally exhausted by the connector
 - committed-offset lookup failures and commit failures fail the query
 - runtime offset invalidation fails the query and suppresses commit
+- repeated scans of the same `(queryId, groupId, topic)` fail fast within one query
 - rerunning with the same group resumes from committed offsets
 - checkpoint-only `LATEST` initialization commits the final clamped empty-range position rather than raw `committedBase` or raw broker `logEnd`
 - checkpoint-only behavior is represented explicitly in split metadata rather than inferred from an empty range
-- docs and the modified-connector README explain the feature, its intentional lower-bound pushdown trade-off, and its non-goals clearly
+- the plan, docs, and the modified-connector README state prominently that commit semantics are split-local source-exhaustion semantics, not query-success semantics
+- docs and the modified-connector README explain the feature, the compatibility behavior of legacy `kafka.consumer-group-id`, the `retry_policy=NONE` requirement, and the feature's non-goals clearly
