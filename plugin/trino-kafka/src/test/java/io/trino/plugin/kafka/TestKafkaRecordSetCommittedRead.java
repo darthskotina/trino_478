@@ -70,6 +70,36 @@ public class TestKafkaRecordSetCommittedRead
         assertThat(consumer.closed).isTrue();
     }
 
+    @Test
+    public void testInterruptedCloseSuppressesCommit()
+    {
+        TrackingCommitConsumer consumer = new TrackingCommitConsumer();
+        RecordCursor cursor = recordSet(consumer, checkpointOnlySplit()).cursor();
+
+        Thread.currentThread().interrupt();
+        try {
+            cursor.close();
+        }
+        finally {
+            Thread.interrupted();
+        }
+
+        assertThat(consumer.commitCalls).isZero();
+        assertThat(consumer.closed).isTrue();
+    }
+
+    @Test
+    public void testRegularSplitCloseBeforeEndSuppressesCommit()
+    {
+        TrackingCommitConsumer consumer = new TrackingCommitConsumer(7);
+        RecordCursor cursor = recordSet(consumer, dataSplit()).cursor();
+
+        cursor.close();
+
+        assertThat(consumer.commitCalls).isZero();
+        assertThat(consumer.closed).isTrue();
+    }
+
     private static KafkaRecordSet recordSet(KafkaConsumer<byte[], byte[]> consumer, KafkaSplit split)
     {
         KafkaConsumerFactory stubFactory = new KafkaConsumerFactory()
@@ -194,6 +224,55 @@ public class TestKafkaRecordSetCommittedRead
         public long position(TopicPartition partition)
         {
             return 5;
+        }
+
+        @Override
+        public void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets)
+        {
+            commitCalls++;
+        }
+
+        @Override
+        public void close()
+        {
+            closed = true;
+        }
+    }
+
+    private static class TrackingCommitConsumer
+            extends KafkaConsumer<byte[], byte[]>
+    {
+        private final long position;
+        private int commitCalls;
+        private boolean closed;
+
+        private TrackingCommitConsumer()
+        {
+            this(7);
+        }
+
+        private TrackingCommitConsumer(long position)
+        {
+            super(minimalConsumerProperties());
+            this.position = position;
+        }
+
+        @Override
+        public void assign(java.util.Collection<TopicPartition> partitions) {}
+
+        @Override
+        public void seek(TopicPartition partition, long offset) {}
+
+        @Override
+        public ConsumerRecords<byte[], byte[]> poll(Duration timeout)
+        {
+            return ConsumerRecords.empty();
+        }
+
+        @Override
+        public long position(TopicPartition partition)
+        {
+            return position;
         }
 
         @Override

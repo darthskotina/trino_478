@@ -287,7 +287,7 @@ public class KafkaRecordSet
         {
             RuntimeException failure = null;
             try {
-                if (committedReadSplitMetadata.isPresent() && fullyConsumed && !failed) {
+                if (committedReadSplitMetadata.isPresent() && shouldCommitCommittedReadOffset(committedReadSplitMetadata.orElseThrow())) {
                     commitCommittedReadOffset(committedReadSplitMetadata.orElseThrow());
                 }
             }
@@ -310,6 +310,20 @@ public class KafkaRecordSet
             if (failure != null) {
                 throw failure;
             }
+        }
+
+        private boolean shouldCommitCommittedReadOffset(KafkaCommittedReadSplitMetadata committedReadMetadata)
+        {
+            if (failed || Thread.currentThread().isInterrupted()) {
+                return false;
+            }
+            if (committedReadMetadata.checkpointOnly()) {
+                return true;
+            }
+            if (!fullyConsumed) {
+                return false;
+            }
+            return kafkaConsumer.position(topicPartition) >= split.getMessagesRange().end();
         }
 
         private void commitCommittedReadOffset(KafkaCommittedReadSplitMetadata committedReadMetadata)

@@ -18,6 +18,7 @@ import com.google.inject.Inject;
 import io.trino.cache.EvictableCacheBuilder;
 import io.trino.spi.TrinoException;
 
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
@@ -32,13 +33,19 @@ public class KafkaCommittedReadRegistry
     @Inject
     public KafkaCommittedReadRegistry() {}
 
-    public void register(String queryId, String groupId, String topicName)
+    public synchronized void register(String queryId, String groupId, String topicName)
     {
         TrackedScanKey key = new TrackedScanKey(queryId, groupId, topicName);
-        if (trackedScans.asMap().putIfAbsent(key, Boolean.TRUE) != null) {
+        if (trackedScans.getIfPresent(key) != null) {
             throw new TrinoException(
                     KAFKA_SPLIT_ERROR,
                     format("Committed-read mode does not allow multiple tracked scans of topic '%s' with group ID '%s' in query '%s'", topicName, groupId, queryId));
+        }
+        try {
+            trackedScans.get(key, () -> Boolean.TRUE);
+        }
+        catch (ExecutionException e) {
+            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to register committed-read scan for topic '%s' with group ID '%s' in query '%s'", topicName, groupId, queryId), e);
         }
     }
 

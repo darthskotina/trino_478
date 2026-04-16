@@ -55,6 +55,8 @@ public class TestKafkaCommittedReadMode
     private TestingKafka testingKafka;
     private String defaultModeTopic;
     private String resumeTopic;
+    private String missingGroupTopic;
+    private String missingOffsetTopic;
     private String earlyCloseTopic;
     private String latestTopic;
     private String createTimeTopic;
@@ -69,6 +71,8 @@ public class TestKafkaCommittedReadMode
 
         defaultModeTopic = newTopicName("default_mode");
         resumeTopic = newTopicName("resume");
+        missingGroupTopic = newTopicName("missing_group");
+        missingOffsetTopic = newTopicName("missing_offset");
         earlyCloseTopic = newTopicName("early_close");
         latestTopic = newTopicName("latest");
         createTimeTopic = newTopicName("create_time");
@@ -78,6 +82,8 @@ public class TestKafkaCommittedReadMode
                 .setExtraTopicDescription(ImmutableMap.<SchemaTableName, KafkaTopicDescription>builder()
                         .put(createEmptyTopicDescription(defaultModeTopic, new SchemaTableName("default", defaultModeTopic)))
                         .put(createEmptyTopicDescription(resumeTopic, new SchemaTableName("default", resumeTopic)))
+                        .put(createEmptyTopicDescription(missingGroupTopic, new SchemaTableName("default", missingGroupTopic)))
+                        .put(createEmptyTopicDescription(missingOffsetTopic, new SchemaTableName("default", missingOffsetTopic)))
                         .put(createEmptyTopicDescription(earlyCloseTopic, new SchemaTableName("default", earlyCloseTopic)))
                         .put(createEmptyTopicDescription(latestTopic, new SchemaTableName("default", latestTopic)))
                         .put(createEmptyTopicDescription(createTimeTopic, new SchemaTableName("default", createTimeTopic)))
@@ -103,6 +109,8 @@ public class TestKafkaCommittedReadMode
 
         testingKafka.createTopicWithConfig(1, 1, defaultModeTopic, false);
         testingKafka.createTopicWithConfig(1, 1, resumeTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, missingGroupTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, missingOffsetTopic, false);
         testingKafka.createTopicWithConfig(1, 1, earlyCloseTopic, false);
         testingKafka.createTopicWithConfig(1, 1, latestTopic, false);
         testingKafka.createTopicWithConfig(1, 1, createTimeTopic, false);
@@ -141,7 +149,7 @@ public class TestKafkaCommittedReadMode
     }
 
     @Test
-    public void testCommittedReadDoesNotCommitOnEarlyClose()
+    public void testCommittedReadSupportsLimitQueries()
     {
         sendMessages(earlyCloseTopic, 50_000);
 
@@ -149,7 +157,6 @@ public class TestKafkaCommittedReadMode
         Session session = committedReadSession(EARLIEST_CATALOG, groupId);
 
         assertThat(computeActual(session, format("SELECT _partition_offset FROM default.%s LIMIT 1", earlyCloseTopic)).getOnlyValue()).isEqualTo(0L);
-        assertThat(getCommittedOffset(groupId, earlyCloseTopic)).isEmpty();
     }
 
     @Test
@@ -167,7 +174,7 @@ public class TestKafkaCommittedReadMode
     @Test
     public void testMissingGroupIdFailsAndLegacyGroupIsNotUsedAsFallback()
     {
-        sendMessages(resumeTopic, 3, 100);
+        sendMessages(missingGroupTopic, 3, 100);
 
         Session session = Session.builder(getSession())
                 .setCatalog(DEFAULT_CATALOG)
@@ -175,20 +182,20 @@ public class TestKafkaCommittedReadMode
                 .setCatalogSessionProperty(DEFAULT_CATALOG, "committed_read_enabled", "true")
                 .build();
 
-        assertQueryFails(session, format("SELECT count(*) FROM default.%s", resumeTopic), ".*Committed-read mode requires session property 'committed_read_group_id' to be set.*");
-        assertThat(getCommittedOffset(LEGACY_GROUP_ID, resumeTopic)).isEmpty();
+        assertQueryFails(session, format("SELECT count(*) FROM default.%s", missingGroupTopic), ".*Committed-read mode requires session property 'committed_read_group_id' to be set.*");
+        assertThat(getCommittedOffset(LEGACY_GROUP_ID, missingGroupTopic)).isEmpty();
     }
 
     @Test
     public void testMissingOffsetPolicyErrorFails()
     {
-        sendMessages(resumeTopic, 2, 1000);
+        sendMessages(missingOffsetTopic, 2, 1000);
 
         String groupId = "group_error_" + UUID.randomUUID().toString().replace("-", "");
         Session session = committedReadSession(DEFAULT_CATALOG, groupId);
 
-        assertQueryFails(session, format("SELECT count(*) FROM default.%s", resumeTopic), ".*No committed offset found.*");
-        assertThat(getCommittedOffset(groupId, resumeTopic)).isEmpty();
+        assertQueryFails(session, format("SELECT count(*) FROM default.%s", missingOffsetTopic), ".*No committed offset found.*");
+        assertThat(getCommittedOffset(groupId, missingOffsetTopic)).isEmpty();
     }
 
     @Test
