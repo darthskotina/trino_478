@@ -38,6 +38,7 @@ import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
+import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -194,9 +195,10 @@ public class KafkaSplitManager
                     new KafkaCommittedReadSplitMetadata(groupId, false, end))));
         }
         if (resolution.missingOrInvalid() && resolution.appliedPolicy().orElse(null) == KafkaCommittedReadMissingOffsetPolicy.LATEST) {
+            long checkpointTarget = clampCheckpointTarget(logStart, logEnd, filteredEnd);
             return new SplitPlanningResult(Optional.of(new SplitRangeAndMetadata(
-                    new Range(start, end),
-                    new KafkaCommittedReadSplitMetadata(groupId, true, start))));
+                    new Range(checkpointTarget, checkpointTarget),
+                    new KafkaCommittedReadSplitMetadata(groupId, true, checkpointTarget))));
         }
         return new SplitPlanningResult(Optional.empty());
     }
@@ -248,6 +250,11 @@ public class KafkaSplitManager
             case LATEST -> logEnd;
             case ERROR -> throw new IllegalStateException("ERROR policy should be handled before applying it");
         };
+    }
+
+    private long clampCheckpointTarget(long logStart, long logEnd, long filteredEnd)
+    {
+        return min(logEnd, max(logStart, filteredEnd));
     }
 
     private record CommittedOffsetResolution(long committedBase, boolean missingOrInvalid, Optional<KafkaCommittedReadMissingOffsetPolicy> appliedPolicy)

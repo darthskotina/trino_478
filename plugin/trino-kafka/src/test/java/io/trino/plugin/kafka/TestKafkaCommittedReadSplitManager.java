@@ -24,14 +24,22 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.testing.TestingConnectorSession;
+import io.trino.testing.assertions.Assert;
 import io.trino.testing.kafka.TestingKafka;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.RecordsToDelete;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.stream.LongStream;
 
@@ -95,6 +103,76 @@ public class TestKafkaCommittedReadSplitManager
             assertThat(split.getCommittedReadSplitMetadata()).isPresent();
             assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isTrue();
             assertThat(split.getCommittedReadSplitMetadata().orElseThrow().commitTarget()).isEqualTo(3L);
+        }
+    }
+
+    @Test
+    public void testLatestCheckpointOnlySplitClampsFilteredEndBelowLogStart()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("clamped_checkpoint");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 10).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            advanceLogStart(testingKafka, topicPartition, 7L);
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.LATEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            TupleDomain<io.trino.spi.connector.ColumnHandle> constraint = TupleDomain.withColumnDomains(Map.of(
+                    internalFieldManager.getFieldById(InternalFieldId.PARTITION_OFFSET_FIELD).getColumnHandle(false),
+                    Domain.create(ValueSet.ofRanges(io.trino.spi.predicate.Range.lessThan(BIGINT, 3L)), false)));
+            List<KafkaSplit> splits = getSplits(splitManager, committedReadSession(config, "group-" + UUID.randomUUID()), tableHandle(topicName, constraint));
+
+            assertThat(splits).hasSize(1);
+            KafkaSplit split = splits.get(0);
+            assertThat(split.getMessagesRange().begin()).isEqualTo(7L);
+            assertThat(split.getMessagesRange().end()).isEqualTo(7L);
+            assertThat(split.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isTrue();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().commitTarget()).isEqualTo(7L);
+        }
+    }
+
+    @Test
+    public void testLatestCheckpointOnlySplitClampsInvalidCommittedOffset()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("invalid_committed_offset");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 10).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            String groupId = "group-" + UUID.randomUUID();
+            setCommittedOffset(testingKafka, groupId, topicPartition, 2L);
+            advanceLogStart(testingKafka, topicPartition, 7L);
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.LATEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            TupleDomain<io.trino.spi.connector.ColumnHandle> constraint = TupleDomain.withColumnDomains(Map.of(
+                    internalFieldManager.getFieldById(InternalFieldId.PARTITION_OFFSET_FIELD).getColumnHandle(false),
+                    Domain.create(ValueSet.ofRanges(io.trino.spi.predicate.Range.lessThan(BIGINT, 3L)), false)));
+            List<KafkaSplit> splits = getSplits(splitManager, committedReadSession(config, groupId), tableHandle(topicName, constraint));
+
+            assertThat(splits).hasSize(1);
+            KafkaSplit split = splits.get(0);
+            assertThat(split.getMessagesRange().begin()).isEqualTo(7L);
+            assertThat(split.getMessagesRange().end()).isEqualTo(7L);
+            assertThat(split.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isTrue();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().commitTarget()).isEqualTo(7L);
         }
     }
 
@@ -176,5 +254,45 @@ public class TestKafkaCommittedReadSplitManager
     private static String topicName(String prefix)
     {
         return prefix + "_" + UUID.randomUUID().toString().replace("-", "_");
+    }
+
+    private static void advanceLogStart(TestingKafka testingKafka, TopicPartition topicPartition, long logStart)
+            throws Exception
+    {
+        try (Admin admin = Admin.create(Map.of("bootstrap.servers", testingKafka.getConnectString()))) {
+            admin.deleteRecords(Map.of(topicPartition, RecordsToDelete.beforeOffset(logStart)))
+                    .all()
+                    .get();
+        }
+
+        Assert.assertEventually(() -> assertThat(getBeginningOffset(testingKafka, topicPartition)).isEqualTo(logStart));
+    }
+
+    private static long getBeginningOffset(TestingKafka testingKafka, TopicPartition topicPartition)
+    {
+        try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProperties(testingKafka, "beginning-offset-reader-" + UUID.randomUUID()))) {
+            return consumer.beginningOffsets(List.of(topicPartition)).get(topicPartition);
+        }
+    }
+
+    private static void setCommittedOffset(TestingKafka testingKafka, String groupId, TopicPartition topicPartition, long committedOffset)
+            throws Exception
+    {
+        try (Admin admin = Admin.create(Map.of("bootstrap.servers", testingKafka.getConnectString()))) {
+            admin.alterConsumerGroupOffsets(groupId, Map.of(topicPartition, new OffsetAndMetadata(committedOffset)))
+                    .all()
+                    .get();
+        }
+    }
+
+    private static Properties consumerProperties(TestingKafka testingKafka, String groupId)
+    {
+        Properties properties = new Properties();
+        properties.putAll(Map.of(
+                "bootstrap.servers", testingKafka.getConnectString(),
+                "group.id", groupId,
+                "key.deserializer", ByteArrayDeserializer.class.getName(),
+                "value.deserializer", ByteArrayDeserializer.class.getName()));
+        return properties;
     }
 }

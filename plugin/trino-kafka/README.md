@@ -155,6 +155,10 @@ Supported values:
 
 - the split emits no rows
 - the split exists only to persist the resolved initial position
+- the committed checkpoint target is clamped into the current broker snapshot
+  `[logStart, logEnd]`
+- if pushed-down upper bounds fall below retained data, Trino persists the
+  clamped empty-range checkpoint rather than the raw filtered end offset
 
 ## Concurrency And Safety
 
