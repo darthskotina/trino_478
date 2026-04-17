@@ -63,6 +63,8 @@ public class TestKafkaCommittedReadMode
     private String createTimeTopic;
     private String duplicateTopic;
     private String rewindTopic;
+    private String rewindEqualityTopic;
+    private String rewindGreaterThanTopic;
     private String rewindSparseTopic;
     private String rewindMissingOffsetTopic;
     private String rewindInvalidOffsetTopic;
@@ -83,6 +85,8 @@ public class TestKafkaCommittedReadMode
         createTimeTopic = newTopicName("create_time");
         duplicateTopic = newTopicName("duplicate");
         rewindTopic = newTopicName("rewind");
+        rewindEqualityTopic = newTopicName("rewind_equal");
+        rewindGreaterThanTopic = newTopicName("rewind_greater_than");
         rewindSparseTopic = newTopicName("rewind_sparse");
         rewindMissingOffsetTopic = newTopicName("rewind_missing");
         rewindInvalidOffsetTopic = newTopicName("rewind_invalid");
@@ -98,6 +102,8 @@ public class TestKafkaCommittedReadMode
                         .put(createEmptyTopicDescription(createTimeTopic, new SchemaTableName("default", createTimeTopic)))
                         .put(createEmptyTopicDescription(duplicateTopic, new SchemaTableName("default", duplicateTopic)))
                         .put(createEmptyTopicDescription(rewindTopic, new SchemaTableName("default", rewindTopic)))
+                        .put(createEmptyTopicDescription(rewindEqualityTopic, new SchemaTableName("default", rewindEqualityTopic)))
+                        .put(createEmptyTopicDescription(rewindGreaterThanTopic, new SchemaTableName("default", rewindGreaterThanTopic)))
                         .put(createEmptyTopicDescription(rewindSparseTopic, new SchemaTableName("default", rewindSparseTopic)))
                         .put(createEmptyTopicDescription(rewindMissingOffsetTopic, new SchemaTableName("default", rewindMissingOffsetTopic)))
                         .put(createEmptyTopicDescription(rewindInvalidOffsetTopic, new SchemaTableName("default", rewindInvalidOffsetTopic)))
@@ -129,6 +135,8 @@ public class TestKafkaCommittedReadMode
         testingKafka.createTopicWithConfig(1, 1, createTimeTopic, false);
         testingKafka.createTopicWithConfig(1, 1, duplicateTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, rewindEqualityTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, rewindGreaterThanTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindSparseTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindMissingOffsetTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindInvalidOffsetTopic, false);
@@ -268,6 +276,44 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindTopic)).getOnlyValue()).isEqualTo(12L);
         assertThat(getCommittedOffset(groupId, rewindTopic)).hasValue(20L);
+    }
+
+    @Test
+    public void testCommittedReadRewindSupportsExactOffsetPredicate()
+    {
+        sendMessages(rewindEqualityTopic, 20);
+
+        String groupId = "group_rewind_equal_" + UUID.randomUUID().toString().replace("-", "");
+        Session baseSession = committedReadSession(EARLIEST_CATALOG, groupId);
+        Session rewindSession = committedReadRewindSession(EARLIEST_CATALOG, groupId);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindEqualityTopic)).getOnlyValue()).isEqualTo(20L);
+        assertThat(getCommittedOffset(groupId, rewindEqualityTopic)).hasValue(20L);
+
+        assertThat(computeActual(rewindSession, format("SELECT count(*) FROM default.%s WHERE _partition_offset = 5", rewindEqualityTopic)).getOnlyValue()).isEqualTo(1L);
+        assertThat(getCommittedOffset(groupId, rewindEqualityTopic)).hasValue(6L);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindEqualityTopic)).getOnlyValue()).isEqualTo(14L);
+        assertThat(getCommittedOffset(groupId, rewindEqualityTopic)).hasValue(20L);
+    }
+
+    @Test
+    public void testCommittedReadRewindSupportsGreaterThanOffsetPredicate()
+    {
+        sendMessages(rewindGreaterThanTopic, 20);
+
+        String groupId = "group_rewind_gt_" + UUID.randomUUID().toString().replace("-", "");
+        Session baseSession = committedReadSession(EARLIEST_CATALOG, groupId);
+        Session rewindSession = committedReadRewindSession(EARLIEST_CATALOG, groupId);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindGreaterThanTopic)).getOnlyValue()).isEqualTo(20L);
+        assertThat(getCommittedOffset(groupId, rewindGreaterThanTopic)).hasValue(20L);
+
+        assertThat(computeActual(rewindSession, format("SELECT count(*) FROM default.%s WHERE _partition_offset > 5 AND _partition_offset < 8", rewindGreaterThanTopic)).getOnlyValue()).isEqualTo(2L);
+        assertThat(getCommittedOffset(groupId, rewindGreaterThanTopic)).hasValue(8L);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindGreaterThanTopic)).getOnlyValue()).isEqualTo(12L);
+        assertThat(getCommittedOffset(groupId, rewindGreaterThanTopic)).hasValue(20L);
     }
 
     @Test

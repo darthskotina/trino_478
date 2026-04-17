@@ -156,9 +156,9 @@ public class KafkaFilterManager
             List<PartitionInfo> partitionFilteredInfos = partitionInfos.stream()
                     .filter(partitionInfo -> partitionIdsFiltered.contains((long) partitionInfo.partition()))
                     .collect(toImmutableList());
-            return new KafkaFilteringResult(partitionFilteredInfos, partitionBeginOffsets, partitionEndOffsets, allowCommittedReadOffsetRewind && offsetRanged.map(range -> range.begin() != INVALID_KAFKA_RANGE_INDEX).orElse(false));
+            return new KafkaFilteringResult(partitionFilteredInfos, partitionBeginOffsets, partitionEndOffsets);
         }
-        return new KafkaFilteringResult(partitionInfos, partitionBeginOffsets, partitionEndOffsets, false);
+        return new KafkaFilteringResult(partitionInfos, partitionBeginOffsets, partitionEndOffsets);
     }
 
     private Optional<Domain> getDomain(InternalFieldId internalFieldId, Map<String, Domain> columnNameToDomain)

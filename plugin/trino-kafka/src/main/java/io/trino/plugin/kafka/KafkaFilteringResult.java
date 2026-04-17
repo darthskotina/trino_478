@@ -26,8 +26,7 @@ import static java.util.Objects.requireNonNull;
 public record KafkaFilteringResult(
         List<PartitionInfo> partitionInfos,
         Map<TopicPartition, Long> partitionBeginOffsets,
-        Map<TopicPartition, Long> partitionEndOffsets,
-        boolean partitionOffsetLowerBoundPushdownApplied)
+        Map<TopicPartition, Long> partitionEndOffsets)
 {
     public KafkaFilteringResult
     {
