@@ -100,6 +100,33 @@ public class TestKafkaRecordSetCommittedRead
         assertThat(consumer.closed).isTrue();
     }
 
+    @Test
+    public void testFullyConsumedRewindSplitCommitsWindowEnd()
+    {
+        ConsumingCommitConsumer consumer = new ConsumingCommitConsumer(5);
+        RecordCursor cursor = recordSet(consumer, rewindDataSplit()).cursor();
+
+        assertThat(cursor.advanceNextPosition()).isTrue();
+        assertThat(cursor.advanceNextPosition()).isFalse();
+        cursor.close();
+
+        assertThat(consumer.commitCalls).isEqualTo(1);
+        assertThat(consumer.lastCommittedOffset).isEqualTo(6L);
+        assertThat(consumer.closed).isTrue();
+    }
+
+    @Test
+    public void testRewindSplitEarlyCloseSuppressesCommit()
+    {
+        TrackingCommitConsumer consumer = new TrackingCommitConsumer(6);
+        RecordCursor cursor = recordSet(consumer, rewindDataSplit()).cursor();
+
+        cursor.close();
+
+        assertThat(consumer.commitCalls).isZero();
+        assertThat(consumer.closed).isTrue();
+    }
+
     private static KafkaRecordSet recordSet(KafkaConsumer<byte[], byte[]> consumer, KafkaSplit split)
     {
         KafkaConsumerFactory stubFactory = new KafkaConsumerFactory()
@@ -151,6 +178,20 @@ public class TestKafkaRecordSetCommittedRead
                 0,
                 new Range(5, 10),
                 Optional.of(new KafkaCommittedReadSplitMetadata("group-b", false, 10)),
+                io.trino.spi.HostAddress.fromString("localhost:9092"));
+    }
+
+    private static KafkaSplit rewindDataSplit()
+    {
+        return new KafkaSplit(
+                "data_topic",
+                DummyRowDecoder.NAME,
+                DummyRowDecoder.NAME,
+                Optional.empty(),
+                Optional.empty(),
+                0,
+                new Range(5, 6),
+                Optional.of(new KafkaCommittedReadSplitMetadata("group-rewind", false, 6)),
                 io.trino.spi.HostAddress.fromString("localhost:9092"));
     }
 
@@ -279,6 +320,70 @@ public class TestKafkaRecordSetCommittedRead
         public void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets)
         {
             commitCalls++;
+        }
+
+        @Override
+        public void close()
+        {
+            closed = true;
+        }
+    }
+
+    private static class ConsumingCommitConsumer
+            extends KafkaConsumer<byte[], byte[]>
+    {
+        private final TopicPartition topicPartition = new TopicPartition("data_topic", 0);
+        private final ConsumerRecords<byte[], byte[]> records;
+        private final long finalPosition;
+        private boolean polled;
+        private int commitCalls;
+        private long lastCommittedOffset = -1;
+        private boolean closed;
+
+        private ConsumingCommitConsumer(long... offsets)
+        {
+            super(minimalConsumerProperties());
+            Map<TopicPartition, List<org.apache.kafka.clients.consumer.ConsumerRecord<byte[], byte[]>>> recordsMap = Map.of(
+                    topicPartition,
+                    java.util.Arrays.stream(offsets)
+                            .mapToObj(offset -> new org.apache.kafka.clients.consumer.ConsumerRecord<byte[], byte[]>(
+                                    "data_topic",
+                                    0,
+                                    offset,
+                                    null,
+                                    null))
+                            .toList());
+            this.records = new ConsumerRecords<>(recordsMap, Map.of(topicPartition, new OffsetAndMetadata(offsets[offsets.length - 1] + 1)));
+            this.finalPosition = offsets[offsets.length - 1] + 1;
+        }
+
+        @Override
+        public void assign(java.util.Collection<TopicPartition> partitions) {}
+
+        @Override
+        public void seek(TopicPartition partition, long offset) {}
+
+        @Override
+        public ConsumerRecords<byte[], byte[]> poll(Duration timeout)
+        {
+            if (polled) {
+                return ConsumerRecords.empty();
+            }
+            polled = true;
+            return records;
+        }
+
+        @Override
+        public long position(TopicPartition partition)
+        {
+            return polled ? finalPosition : 5;
+        }
+
+        @Override
+        public void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets)
+        {
+            commitCalls++;
+            lastCommittedOffset = offsets.get(topicPartition).offset();
         }
 
         @Override

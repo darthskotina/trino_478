@@ -33,6 +33,7 @@ public final class KafkaSessionProperties
     private static final String TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED = "timestamp_upper_bound_force_push_down_enabled";
     private static final String COMMITTED_READ_ENABLED = "committed_read_enabled";
     private static final String COMMITTED_READ_GROUP_ID = "committed_read_group_id";
+    private static final String COMMITTED_READ_ALLOW_OFFSET_REWIND = "committed_read_allow_offset_rewind";
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
@@ -56,6 +57,11 @@ public final class KafkaSessionProperties
                                 throw new TrinoException(INVALID_SESSION_PROPERTY, format("Session property '%s' must not be blank", COMMITTED_READ_GROUP_ID));
                             }
                         },
+                        false),
+                PropertyMetadata.booleanProperty(
+                        COMMITTED_READ_ALLOW_OFFSET_REWIND,
+                        "Allow committed-read mode to honor explicit _partition_offset lower bounds and commit a lower offset window when fully consumed",
+                        false,
                         false));
     }
 
@@ -85,6 +91,11 @@ public final class KafkaSessionProperties
     public static Optional<String> getCommittedReadGroupId(ConnectorSession session)
     {
         return Optional.ofNullable(session.getProperty(COMMITTED_READ_GROUP_ID, String.class));
+    }
+
+    public static boolean isCommittedReadAllowOffsetRewind(ConnectorSession session)
+    {
+        return session.getProperty(COMMITTED_READ_ALLOW_OFFSET_REWIND, Boolean.class);
     }
 
     public static String getRequiredCommittedReadGroupId(ConnectorSession session)

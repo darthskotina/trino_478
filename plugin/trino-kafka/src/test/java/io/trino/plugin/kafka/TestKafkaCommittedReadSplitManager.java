@@ -36,6 +36,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -46,6 +47,7 @@ import java.util.stream.LongStream;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestKafkaCommittedReadSplitManager
 {
@@ -176,6 +178,29 @@ public class TestKafkaCommittedReadSplitManager
         }
     }
 
+    @Test
+    public void testCommittedReadRejectsOffsetLowerBoundByDefault()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("reject_rewind");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 10).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            assertThatThrownBy(() -> getSplits(
+                    splitManager,
+                    committedReadSession(config, "group-" + UUID.randomUUID()),
+                    tableHandle(topicName, partitionOffsetConstraint(internalFieldManager, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 3L)))))
+                    .hasMessageContaining("does not allow lower-bound predicates on '_partition_offset'");
+        }
+    }
+
     private static KafkaConfig baseConfig(TestingKafka testingKafka)
     {
         return new KafkaConfig()
@@ -249,6 +274,13 @@ public class TestKafkaCommittedReadSplitManager
             }
         }
         return splits;
+    }
+
+    private static TupleDomain<io.trino.spi.connector.ColumnHandle> partitionOffsetConstraint(KafkaInternalFieldManager internalFieldManager, io.trino.spi.predicate.Range... ranges)
+    {
+        return TupleDomain.withColumnDomains(Map.of(
+                internalFieldManager.getFieldById(InternalFieldId.PARTITION_OFFSET_FIELD).getColumnHandle(false),
+                Domain.create(ValueSet.ofRanges(Arrays.asList(ranges)), false)));
     }
 
     private static String topicName(String prefix)

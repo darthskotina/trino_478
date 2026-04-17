@@ -34,7 +34,7 @@ This plan is intentionally limited to implementation planning. It does not inclu
 - Query-success-only commits
 - Kafka `subscribe(...)` / rebalance-based group management
 - Multi-split-per-partition ordered checkpointing
-- Backward reads in committed-read mode as a first-class feature
+- Backward reads in committed-read mode as an always-on feature
 - Kafka transactional visibility semantics such as `isolation.level=read_committed`
 - Any Trino SPI or engine changes outside the Kafka connector unless an unexpected blocker is discovered
 
@@ -50,6 +50,14 @@ The connector currently behaves like a bounded table scan over Kafka:
 There is already a `kafka.consumer-group-id` catalog property in the plugin, but today it does not produce committed-read semantics on reads.
 
 The current branch also gives `kafka.consumer-group-id` a hardcoded default value in `KafkaConfig`. That legacy property and default remain for compatibility in default mode, but they must not be used as an implicit committed-read group.
+
+This plan has since been extended with an explicit session-scoped rewind flag:
+
+- `committed_read_allow_offset_rewind`
+
+That flag keeps default committed-read behavior unchanged, but allows
+historical `_partition_offset` windows to be planned and committed under the
+same group when enabled for a query.
 
 ## Intended Semantics
 
@@ -140,9 +148,21 @@ For each partition in committed-read mode:
 
 Committed-read predicate compatibility rules:
 
-- lower-bound predicates on `_partition_offset` are rejected
+- lower-bound predicates on `_partition_offset` are rejected by default
 - lower-bound predicates on `_timestamp` are rejected
 - `_timestamp` upper bounds are rejected unless the topic uses `LogAppendTime`
+
+When session `committed_read_allow_offset_rewind=true`:
+
+- explicit `_partition_offset` lower bounds are allowed
+- `_partition_offset = x` plans `[x, x + 1)`
+- `_partition_offset > x` plans from `x + 1`
+- `_partition_offset >= x` plans from `x`
+- the explicit lower bound overrides the resolved committed base for choosing
+  the planned start offset
+- explicit rewind windows that resolve to an empty range produce no split and
+  no commit
+- `_timestamp` rewind remains out of scope
 
 The final split range is:
 

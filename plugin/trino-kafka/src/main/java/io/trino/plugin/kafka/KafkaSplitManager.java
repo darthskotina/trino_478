@@ -26,6 +26,7 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.predicate.Domain;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
@@ -38,6 +39,7 @@ import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
+import static io.trino.plugin.kafka.KafkaFilterManager.filterRangeByDomain;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.String.format;
@@ -82,6 +84,7 @@ public class KafkaSplitManager
     {
         KafkaTableHandle kafkaTableHandle = (KafkaTableHandle) table;
         boolean committedReadMode = KafkaSessionProperties.isCommittedReadEnabled(session);
+        boolean allowCommittedReadOffsetRewind = committedReadMode && KafkaSessionProperties.isCommittedReadAllowOffsetRewind(session);
         Optional<String> committedReadGroupId = committedReadMode ? Optional.of(KafkaSessionProperties.getRequiredCommittedReadGroupId(session)) : Optional.empty();
 
         committedReadGroupId.ifPresent(groupId -> committedReadRegistry.register(session.getQueryId(), groupId, kafkaTableHandle.topicName()));
@@ -102,6 +105,7 @@ public class KafkaSplitManager
             partitionInfos = kafkaFilteringResult.partitionInfos();
             partitionBeginOffsets = kafkaFilteringResult.partitionBeginOffsets();
             partitionEndOffsets = kafkaFilteringResult.partitionEndOffsets();
+            Optional<Long> explicitPartitionOffsetLowerBound = allowCommittedReadOffsetRewind ? getExplicitPartitionOffsetLowerBound(kafkaTableHandle) : Optional.empty();
 
             ImmutableList.Builder<KafkaSplit> splits = ImmutableList.builder();
             Optional<String> keyDataSchemaContents = contentSchemaProvider.getKey(kafkaTableHandle);
@@ -135,7 +139,10 @@ public class KafkaSplitManager
                         topicPartition,
                         partitionLogStartOffsets.get(topicPartition),
                         partitionLogEndOffsets.get(topicPartition),
+                        explicitPartitionOffsetLowerBound.map(offset -> max(partitionLogStartOffsets.get(topicPartition), offset)).orElse(partitionBeginOffsets.get(topicPartition)),
                         partitionEndOffsets.get(topicPartition),
+                        allowCommittedReadOffsetRewind,
+                        explicitPartitionOffsetLowerBound.isPresent(),
                         committedReadGroupId.orElseThrow(),
                         committedOffsets.get(topicPartition));
                 splitPlanningResult.split().ifPresent(rangeAndMetadata -> splits.add(new KafkaSplit(
@@ -164,6 +171,24 @@ public class KafkaSplitManager
         return new TopicPartition(partitionInfo.topic(), partitionInfo.partition());
     }
 
+    private static Optional<Long> getExplicitPartitionOffsetLowerBound(KafkaTableHandle tableHandle)
+    {
+        return tableHandle.constraint()
+                .getDomains()
+                .flatMap(domains -> domains.entrySet().stream()
+                        .filter(entry -> ((KafkaColumnHandle) entry.getKey()).getName().equals("_partition_offset"))
+                        .map(Map.Entry::getValue)
+                        .findFirst())
+                .flatMap(KafkaSplitManager::getExplicitLowerBound);
+    }
+
+    private static Optional<Long> getExplicitLowerBound(Domain domain)
+    {
+        return filterRangeByDomain(domain)
+                .map(Range::begin)
+                .filter(begin -> begin >= 0);
+    }
+
     private Map<TopicPartition, OffsetAndMetadata> getCommittedOffsets(ConnectorSession session, String groupId)
     {
         try (Admin admin = adminFactory.create(session)) {
@@ -181,12 +206,16 @@ public class KafkaSplitManager
             TopicPartition topicPartition,
             long logStart,
             long logEnd,
+            long filteredBegin,
             long filteredEnd,
+            boolean allowOffsetRewind,
+            boolean explicitOffsetLowerBound,
             String groupId,
             OffsetAndMetadata committedOffsetMetadata)
     {
         CommittedOffsetResolution resolution = resolveCommittedOffset(tableHandle, topicPartition, logStart, logEnd, groupId, committedOffsetMetadata);
-        long start = min(filteredEnd, resolution.committedBase());
+        boolean explicitRewind = allowOffsetRewind && explicitOffsetLowerBound;
+        long start = explicitRewind ? filteredBegin : min(filteredEnd, resolution.committedBase());
         long end = filteredEnd;
 
         if (start < end) {
@@ -194,7 +223,7 @@ public class KafkaSplitManager
                     new Range(start, end),
                     new KafkaCommittedReadSplitMetadata(groupId, false, end))));
         }
-        if (resolution.missingOrInvalid() && resolution.appliedPolicy().orElse(null) == KafkaCommittedReadMissingOffsetPolicy.LATEST) {
+        if (!explicitRewind && resolution.missingOrInvalid() && resolution.appliedPolicy().orElse(null) == KafkaCommittedReadMissingOffsetPolicy.LATEST) {
             long checkpointTarget = clampCheckpointTarget(logStart, logEnd, filteredEnd);
             return new SplitPlanningResult(Optional.of(new SplitRangeAndMetadata(
                     new Range(checkpointTarget, checkpointTarget),

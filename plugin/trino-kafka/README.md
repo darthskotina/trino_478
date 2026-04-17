@@ -40,6 +40,7 @@ Session properties used by committed-read mode:
 
 - `committed_read_enabled`
 - `committed_read_group_id`
+- `committed_read_allow_offset_rewind`
 
 Legacy compatibility property:
 
@@ -115,13 +116,13 @@ This feature does not provide:
 
 ## Predicate Rules In Committed-Read Mode
 
-Committed-read mode preserves Kafka-like consumer-group resume semantics. For
-that reason, SQL predicates must not be allowed to move a group's stored
-position forward past unread records.
+Committed-read mode preserves Kafka-like consumer-group resume semantics by
+default. An additional session flag can opt a query into offset rewind
+planning.
 
 Committed-read mode therefore rejects:
 
-- lower-bound predicates on `_partition_offset`
+- lower-bound predicates on `_partition_offset` by default
 - lower-bound predicates on `_timestamp`
 
 Committed-read mode allows `_timestamp` upper bounds only when they are safe for
@@ -136,6 +137,29 @@ Rationale:
   checkpoints rather than normal consumer-group resume points
 - rejecting unsupported bounds keeps committed offsets meaningful as "next
   unread offset for this group"
+
+Optional rewind extension:
+
+- session `committed_read_allow_offset_rewind = true` allows explicit
+  `_partition_offset` lower bounds in committed-read mode
+- this applies to `_partition_offset` only in this iteration; `_timestamp`
+  lower bounds remain rejected
+- explicit offset windows become authoritative for planning, even when
+  `kafka.committed-read-missing-offset-policy=LATEST`
+- `_partition_offset = x` reads exactly `[x, x + 1)`
+- `_partition_offset > x` starts at `x + 1`
+- `_partition_offset >= x` starts at `x`
+- if the explicit rewind window resolves to an empty range after broker-range
+  clamping, Trino plans no split and commits nothing
+
+Operational consequence:
+
+- fully consumed rewind-enabled reads may move the stored Kafka group offset
+  backward to the end of the explicit window
+- same-group concurrent queries remain unsafe and last-writer-wins, including
+  backward offset movement
+- the existing repeated-scan guard and the `retry_policy=NONE` requirement
+  still apply unchanged
 
 ## Missing Or Invalid Committed Offsets
 
@@ -217,6 +241,8 @@ Use committed-read mode for:
 - dedicated service-style tracked consumption
 - one logical consumer-group namespace per read path
 - workloads that want resume behavior across repeated Trino reads
+- controlled rewind/replay workflows that use explicit `_partition_offset`
+  windows under a dedicated group ID
 
 Use default mode for:
 

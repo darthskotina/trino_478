@@ -94,6 +94,7 @@ public class KafkaFilterManager
         verify(!constraint.isNone(), "constraint is none");
 
         if (!constraint.isAll()) {
+            boolean allowCommittedReadOffsetRewind = committedReadMode && KafkaSessionProperties.isCommittedReadAllowOffsetRewind(session);
             Set<Long> partitionIds = partitionInfos.stream().map(partitionInfo -> (long) partitionInfo.partition()).collect(toImmutableSet());
 
             Map<String, Domain> domains = constraint.getDomains().orElseThrow()
@@ -113,14 +114,14 @@ public class KafkaFilterManager
                     .flatMap(KafkaFilterManager::filterRangeByDomain);
 
             if (committedReadMode) {
-                offsetDomain.ifPresent(domain -> validateCommittedReadOffsetPredicate(kafkaTableHandle.topicName(), domain));
+                offsetDomain.ifPresent(domain -> validateCommittedReadOffsetPredicate(kafkaTableHandle.topicName(), domain, allowCommittedReadOffsetRewind));
                 offsetTimestampDomain.ifPresent(domain -> validateCommittedReadTimestampPredicate(session, kafkaTableHandle.topicName(), domain));
             }
 
             // push down offset
             if (offsetRanged.isPresent()) {
                 Range range = offsetRanged.get();
-                if (!committedReadMode) {
+                if (!committedReadMode || allowCommittedReadOffsetRewind) {
                     partitionBeginOffsets = overridePartitionBeginOffsets(partitionBeginOffsets,
                             partition -> (range.begin() != INVALID_KAFKA_RANGE_INDEX) ? Optional.of(range.begin()) : Optional.empty());
                 }
@@ -155,9 +156,9 @@ public class KafkaFilterManager
             List<PartitionInfo> partitionFilteredInfos = partitionInfos.stream()
                     .filter(partitionInfo -> partitionIdsFiltered.contains((long) partitionInfo.partition()))
                     .collect(toImmutableList());
-            return new KafkaFilteringResult(partitionFilteredInfos, partitionBeginOffsets, partitionEndOffsets);
+            return new KafkaFilteringResult(partitionFilteredInfos, partitionBeginOffsets, partitionEndOffsets, allowCommittedReadOffsetRewind && offsetRanged.map(range -> range.begin() != INVALID_KAFKA_RANGE_INDEX).orElse(false));
         }
-        return new KafkaFilteringResult(partitionInfos, partitionBeginOffsets, partitionEndOffsets);
+        return new KafkaFilteringResult(partitionInfos, partitionBeginOffsets, partitionEndOffsets, false);
     }
 
     private Optional<Domain> getDomain(InternalFieldId internalFieldId, Map<String, Domain> columnNameToDomain)
@@ -166,9 +167,9 @@ public class KafkaFilterManager
         return Optional.ofNullable(columnNameToDomain.get(columnName));
     }
 
-    private void validateCommittedReadOffsetPredicate(String topic, Domain domain)
+    private void validateCommittedReadOffsetPredicate(String topic, Domain domain, boolean allowCommittedReadOffsetRewind)
     {
-        if (hasLowerBound(domain)) {
+        if (hasLowerBound(domain) && !allowCommittedReadOffsetRewind) {
             throw new TrinoException(
                     KAFKA_SPLIT_ERROR,
                     format("Committed-read mode does not allow lower-bound predicates on '_partition_offset' for topic '%s'", topic));
