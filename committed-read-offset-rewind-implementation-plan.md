@@ -57,6 +57,21 @@ Behavior:
   committed-read mode and allow a fully consumed query to commit an earlier
   offset than the group's current stored offset
 
+Important semantic clarification:
+
+- when rewind is enabled and the query supplies an explicit lower-bound
+  `_partition_offset` predicate, that predicate is authoritative for choosing
+  the planned start offset
+- this also applies when the group has no committed offset or its committed
+  offset is no longer valid on the broker
+- in other words, an explicit rewind request may intentionally override the
+  catalog's `kafka.committed-read-missing-offset-policy=LATEST` fallback and
+  force a historical read window
+- this is the intended recovery workflow for operators who need to reread data
+  after the group offset has advanced too far
+- when rewind is not explicitly requested, the existing missing-offset-policy
+  behavior remains unchanged
+
 Rationale for the chosen name:
 
 - the default remains conservative and backward-compatible
@@ -180,6 +195,8 @@ When rewind is allowed:
 - base start candidate from the filtered begin offset if present
 - otherwise use the resolved committed offset as today
 - use filtered end as the end bound
+- if the query provides an explicit filtered begin offset, treat it as an
+  intentional override even when missing-offset policy is `LATEST`
 - clamp the effective start to broker log start and effective end to broker log
   end as the current filtering path already does
 - if effective start < effective end, plan one data split with
@@ -233,6 +250,12 @@ Add coverage for:
   `_partition_offset`
 - bounded rewind window where committed offset is ahead of the requested start
   produces a split covering the requested window
+- rewind enabled plus missing-offset policy `LATEST` plus no committed offset
+  plus explicit lower-bound `_partition_offset` produces a historical data
+  split rather than a checkpoint-only split
+- rewind enabled plus missing-offset policy `LATEST` plus invalid committed
+  offset plus explicit lower-bound `_partition_offset` produces a historical
+  data split starting from the requested window after broker-range clamping
 - fully consuming a rewind-planned split keeps `commitTarget` at the window end
 - early close of a rewind-planned split still suppresses commit
 
@@ -253,6 +276,11 @@ Add coverage for:
 - run the same group again without explicit rewind filter and verify the query
   resumes from the rewound committed offset
 - verify the rewind-blocked default still rejects the same query shape
+- verify that a brand-new group under catalog missing-offset policy `LATEST`
+  can still read an explicit historical offset window when rewind is enabled
+- verify that a group with an invalid committed offset under catalog
+  missing-offset policy `LATEST` can still read an explicit historical offset
+  window when rewind is enabled
 
 Important test design note:
 
