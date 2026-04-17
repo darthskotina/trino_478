@@ -71,6 +71,18 @@ Important semantic clarification:
   after the group offset has advanced too far
 - when rewind is not explicitly requested, the existing missing-offset-policy
   behavior remains unchanged
+- equality is not a special case outside the normal range model:
+  `_partition_offset = x` must be planned as the half-open window `[x, x+1)`
+  so that it reads exactly offset `x`
+
+Inherited committed-read safety constraints remain in force:
+
+- the existing repeated-scan/self-join guard keyed by
+  `(queryId, groupId, topicName)` remains required and unchanged
+- committed-read mode, including rewind-enabled mode, still carries the same
+  deployment requirement that Trino `retry_policy=NONE`
+- rewind is an extension of committed-read semantics, not a separate execution
+  mode with weaker safety assumptions
 
 Rationale for the chosen name:
 
@@ -132,6 +144,8 @@ Target behavior:
 - committed-read + rewind allowed: `_partition_offset >= x`,
   `_partition_offset > x`, `_partition_offset = x`, and bounded windows become
   valid
+- `_partition_offset = x` must retain single-offset semantics by planning the
+  half-open range `[x, x+1)` rather than an empty range
 
 Important detail:
 
@@ -201,9 +215,29 @@ When rewind is allowed:
   end as the current filtering path already does
 - if effective start < effective end, plan one data split with
   `commitTarget = effective end`
-- if effective start == effective end, do not plan a normal data split
-- preserve current checkpoint-only behavior for missing/invalid committed offset
-  under `LATEST` only where it still makes semantic sense
+- if effective start == effective end after clamping, plan no data split and do
+  not commit any new offset
+- do not introduce checkpoint-only rewind commits for ordinary empty filtered
+  windows, including:
+  - `begin >= end`
+  - explicit rewind windows that become empty after broker-range clamping
+  - missing offset plus `LATEST` plus explicit rewind where the requested window
+    is empty after planning
+- preserve checkpoint-only behavior only for the existing committed-read
+  initialization path where no explicit rewind window is requested and
+  missing-offset policy `LATEST` resolves the group to the broker end
+
+Decision table for the rewind-enabled path:
+
+- explicit rewind requested, effective start < effective end:
+  plan a data split and commit `effective end` only after full consumption
+- explicit rewind requested, effective start == effective end:
+  no split, no commit
+- no explicit rewind requested, valid committed offset:
+  preserve current behavior
+- no explicit rewind requested, missing/invalid committed offset, policy
+  `LATEST`:
+  preserve current checkpoint-only initialization behavior
 
 Key semantic point:
 
@@ -248,6 +282,12 @@ Add coverage for:
   `_partition_offset`
 - committed-read with rewind allowed accepts lower-bound
   `_partition_offset`
+- translation semantics for `_partition_offset = x` produce a split covering
+  exactly `[x, x+1)`
+- translation semantics for `_partition_offset > x` produce a split beginning at
+  `x + 1`
+- translation semantics for `_partition_offset >= x` produce a split beginning
+  at `x`
 - bounded rewind window where committed offset is ahead of the requested start
   produces a split covering the requested window
 - rewind enabled plus missing-offset policy `LATEST` plus no committed offset
@@ -256,6 +296,11 @@ Add coverage for:
 - rewind enabled plus missing-offset policy `LATEST` plus invalid committed
   offset plus explicit lower-bound `_partition_offset` produces a historical
   data split starting from the requested window after broker-range clamping
+- explicit rewind window that becomes empty after broker-range clamping produces
+  no split and no commit
+- explicit rewind with `begin >= end` produces no split and no commit
+- mixed per-partition outcomes are handled correctly when one partition plans a
+  rewind data split and another resolves to an empty window
 - fully consuming a rewind-planned split keeps `commitTarget` at the window end
 - early close of a rewind-planned split still suppresses commit
 
@@ -306,6 +351,14 @@ Required updates:
   iteration
 - warn that same-group concurrent queries can overwrite each other's stored
   offsets, including backward movement
+- restate that the existing repeated-scan/self-join guard still applies to
+  committed-read rewind mode
+- restate that committed-read rewind mode inherits the existing operational
+  requirement that Trino `retry_policy=NONE`
+- document exact predicate semantics for `_partition_offset = x`,
+  `_partition_offset > x`, and `_partition_offset >= x`
+- document that explicit rewind windows which resolve to empty ranges produce no
+  split and no commit
 
 ## Decisions Confirmed Before Implementation
 
@@ -316,28 +369,6 @@ These decisions are already fixed for the coding instance:
 
 2. Scope:
    `_partition_offset` only
-
-## Remaining Semantic Decisions
-
-1. Equality semantics:
-   Should `_partition_offset = x` be treated as a rewind-capable single-record
-   window when rewind is allowed
-
-2. Empty-window semantics:
-   If a rewind-enabled predicate resolves to an empty range, should the query
-   produce no split and no commit, or should there be a checkpoint-only rewind
-   commit to the empty-window end
-
-Recommended answer:
-
-- no checkpoint-only rewind for ordinary empty filtered windows
-- only keep checkpoint-only behavior for the existing `LATEST` missing-offset
-  initialization path
-
-Reason:
-
-- it keeps rewind tied to actual planned consumption rather than making empty
-  filters mutate group state
 
 ## Complexity Assessment
 
