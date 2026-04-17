@@ -63,6 +63,7 @@ public class TestKafkaCommittedReadMode
     private String createTimeTopic;
     private String duplicateTopic;
     private String rewindTopic;
+    private String rewindSparseTopic;
     private String rewindMissingOffsetTopic;
     private String rewindInvalidOffsetTopic;
 
@@ -82,6 +83,7 @@ public class TestKafkaCommittedReadMode
         createTimeTopic = newTopicName("create_time");
         duplicateTopic = newTopicName("duplicate");
         rewindTopic = newTopicName("rewind");
+        rewindSparseTopic = newTopicName("rewind_sparse");
         rewindMissingOffsetTopic = newTopicName("rewind_missing");
         rewindInvalidOffsetTopic = newTopicName("rewind_invalid");
 
@@ -96,6 +98,7 @@ public class TestKafkaCommittedReadMode
                         .put(createEmptyTopicDescription(createTimeTopic, new SchemaTableName("default", createTimeTopic)))
                         .put(createEmptyTopicDescription(duplicateTopic, new SchemaTableName("default", duplicateTopic)))
                         .put(createEmptyTopicDescription(rewindTopic, new SchemaTableName("default", rewindTopic)))
+                        .put(createEmptyTopicDescription(rewindSparseTopic, new SchemaTableName("default", rewindSparseTopic)))
                         .put(createEmptyTopicDescription(rewindMissingOffsetTopic, new SchemaTableName("default", rewindMissingOffsetTopic)))
                         .put(createEmptyTopicDescription(rewindInvalidOffsetTopic, new SchemaTableName("default", rewindInvalidOffsetTopic)))
                         .buildOrThrow())
@@ -126,6 +129,7 @@ public class TestKafkaCommittedReadMode
         testingKafka.createTopicWithConfig(1, 1, createTimeTopic, false);
         testingKafka.createTopicWithConfig(1, 1, duplicateTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, rewindSparseTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindMissingOffsetTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindInvalidOffsetTopic, false);
         return queryRunner;
@@ -264,6 +268,24 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindTopic)).getOnlyValue()).isEqualTo(12L);
         assertThat(getCommittedOffset(groupId, rewindTopic)).hasValue(20L);
+    }
+
+    @Test
+    public void testCommittedReadRewindRejectsDiscontiguousOffsetPredicates()
+    {
+        sendMessages(rewindSparseTopic, 120);
+
+        String groupId = "group_rewind_sparse_" + UUID.randomUUID().toString().replace("-", "");
+        Session rewindSession = committedReadRewindSession(EARLIEST_CATALOG, groupId);
+
+        assertQueryFails(
+                rewindSession,
+                format("SELECT count(*) FROM default.%s WHERE _partition_offset IN (5, 100)", rewindSparseTopic),
+                ".*supports only contiguous '_partition_offset' window predicates.*");
+        assertQueryFails(
+                rewindSession,
+                format("SELECT count(*) FROM default.%s WHERE _partition_offset < 5 OR (_partition_offset >= 10 AND _partition_offset < 20)", rewindSparseTopic),
+                ".*supports only contiguous '_partition_offset' window predicates.*");
     }
 
     @Test

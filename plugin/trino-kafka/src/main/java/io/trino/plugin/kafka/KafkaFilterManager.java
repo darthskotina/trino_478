@@ -174,6 +174,11 @@ public class KafkaFilterManager
                     KAFKA_SPLIT_ERROR,
                     format("Committed-read mode does not allow lower-bound predicates on '_partition_offset' for topic '%s'", topic));
         }
+        if (allowCommittedReadOffsetRewind && !isSingleContiguousRange(domain)) {
+            throw new TrinoException(
+                    KAFKA_SPLIT_ERROR,
+                    format("Committed-read rewind mode supports only contiguous '_partition_offset' window predicates for topic '%s'", topic));
+        }
     }
 
     private void validateCommittedReadTimestampPredicate(ConnectorSession session, String topic, Domain domain)
@@ -364,6 +369,18 @@ public class KafkaFilterManager
         if (valueSet instanceof SortedRangeSet sortedRangeSet) {
             return sortedRangeSet.getRanges().getOrderedRanges().stream()
                     .anyMatch(range -> range.getHighValue().isPresent());
+        }
+        return false;
+    }
+
+    private static boolean isSingleContiguousRange(Domain domain)
+    {
+        if (domain.isSingleValue()) {
+            return true;
+        }
+        ValueSet valueSet = domain.getValues();
+        if (valueSet instanceof SortedRangeSet sortedRangeSet) {
+            return sortedRangeSet.getRanges().getOrderedRanges().size() == 1;
         }
         return false;
     }

@@ -201,6 +201,45 @@ public class TestKafkaCommittedReadSplitManager
         }
     }
 
+    @Test
+    public void testCommittedReadRewindRejectsDiscontiguousOffsetPredicates()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("reject_sparse_rewind");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 120).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            assertThatThrownBy(() -> getSplits(
+                    splitManager,
+                    committedReadRewindSession(config, "group-" + UUID.randomUUID()),
+                    tableHandle(
+                            topicName,
+                            partitionOffsetConstraint(
+                                    internalFieldManager,
+                                    io.trino.spi.predicate.Range.equal(BIGINT, 5L),
+                                    io.trino.spi.predicate.Range.equal(BIGINT, 100L)))))
+                    .hasMessageContaining("supports only contiguous '_partition_offset' window predicates");
+
+            assertThatThrownBy(() -> getSplits(
+                    splitManager,
+                    committedReadRewindSession(config, "group-" + UUID.randomUUID()),
+                    tableHandle(
+                            topicName,
+                            partitionOffsetConstraint(
+                                    internalFieldManager,
+                                    io.trino.spi.predicate.Range.lessThan(BIGINT, 5L),
+                                    io.trino.spi.predicate.Range.range(BIGINT, 10L, true, 20L, false)))))
+                    .hasMessageContaining("supports only contiguous '_partition_offset' window predicates");
+        }
+    }
+
     private static KafkaConfig baseConfig(TestingKafka testingKafka)
     {
         return new KafkaConfig()
@@ -244,6 +283,17 @@ public class TestKafkaCommittedReadSplitManager
                 .setPropertyValues(Map.of(
                         "committed_read_enabled", true,
                         "committed_read_group_id", groupId))
+                .build();
+    }
+
+    private static ConnectorSession committedReadRewindSession(KafkaConfig config, String groupId)
+    {
+        return TestingConnectorSession.builder()
+                .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties())
+                .setPropertyValues(Map.of(
+                        "committed_read_enabled", true,
+                        "committed_read_group_id", groupId,
+                        "committed_read_allow_offset_rewind", true))
                 .build();
     }
 
