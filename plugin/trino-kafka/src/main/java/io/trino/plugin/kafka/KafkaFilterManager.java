@@ -210,37 +210,44 @@ public class KafkaFilterManager
     @VisibleForTesting
     public static Optional<Range> filterRangeByDomain(Domain domain)
     {
-        Long low = INVALID_KAFKA_RANGE_INDEX;
-        Long high = INVALID_KAFKA_RANGE_INDEX;
-        if (domain.isSingleValue()) {
-            // still return range for single value case like (_partition_offset=XXX or _timestamp=XXX)
-            low = (long) domain.getSingleValue();
-            high = (long) domain.getSingleValue();
-        }
-        else {
-            ValueSet valueSet = domain.getValues();
-            if (valueSet instanceof SortedRangeSet sortedRangeSet) {
-                // still return range for single value case like (_partition_offset in (XXX1,XXX2) or _timestamp in XXX1, XXX2)
-                Ranges ranges = sortedRangeSet.getRanges();
-                List<io.trino.spi.predicate.Range> rangeList = ranges.getOrderedRanges();
-                if (rangeList.stream().allMatch(io.trino.spi.predicate.Range::isSingleValue)) {
-                    List<Long> values = rangeList.stream()
-                            .map(range -> (Long) range.getSingleValue())
-                            .collect(toImmutableList());
-                    low = Collections.min(values);
-                    high = Collections.max(values);
-                }
-                else {
-                    io.trino.spi.predicate.Range span = ranges.getSpan();
-                    low = getLowIncludedValue(span).orElse(low);
-                    high = getHighIncludedValue(span).orElse(high);
-                }
-            }
-        }
+        MinMax minMax = getMinMaxValues(domain);
+        long low = minMax.min();
+        long high = minMax.max();
         if (high != INVALID_KAFKA_RANGE_INDEX) {
             high = high + 1;
         }
         return Optional.of(new Range(low, high));
+    }
+
+    @VisibleForTesting
+    static MinMax getMinMaxValues(Domain domain)
+    {
+        long low = INVALID_KAFKA_RANGE_INDEX;
+        long high = INVALID_KAFKA_RANGE_INDEX;
+        if (domain.isSingleValue()) {
+            long singleValue = (long) domain.getSingleValue();
+            return new MinMax(singleValue, singleValue);
+        }
+
+        ValueSet valueSet = domain.getValues();
+        if (valueSet instanceof SortedRangeSet sortedRangeSet) {
+            // still return range for single value case like (_partition_offset in (XXX1,XXX2) or _timestamp in XXX1, XXX2)
+            Ranges ranges = sortedRangeSet.getRanges();
+            List<io.trino.spi.predicate.Range> rangeList = ranges.getOrderedRanges();
+            if (rangeList.stream().allMatch(io.trino.spi.predicate.Range::isSingleValue)) {
+                List<Long> values = rangeList.stream()
+                        .map(range -> (Long) range.getSingleValue())
+                        .collect(toImmutableList());
+                low = Collections.min(values);
+                high = Collections.max(values);
+            }
+            else {
+                io.trino.spi.predicate.Range span = ranges.getSpan();
+                low = getLowIncludedValue(span).orElse(low);
+                high = getHighIncludedValue(span).orElse(high);
+            }
+        }
+        return new MinMax(low, high);
     }
 
     @VisibleForTesting
@@ -299,4 +306,6 @@ public class KafkaFilterManager
         }
         throw new IllegalArgumentException("Unsupported type: " + type);
     }
+
+    record MinMax(long min, long max) {}
 }

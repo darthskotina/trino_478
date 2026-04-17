@@ -39,12 +39,15 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 public class KafkaConfig
 {
     private static final int KAFKA_DEFAULT_PORT = 9092;
+    private static final long DEFAULT_MAX_READ_OFFSETS = 100_000;
 
     private Set<HostAddress> nodes = ImmutableSet.of();
     private DataSize kafkaBufferSize = DataSize.of(64, Unit.KILOBYTE);
     private String defaultSchema = "default";
     private boolean hideInternalColumns = true;
     private int messagesPerSplit = 100_000;
+    private boolean requireFilter = true;
+    private long maxReadOffsets = DEFAULT_MAX_READ_OFFSETS;
     private boolean timestampUpperBoundPushDownEnabled;
     private String tableDescriptionSupplier = FileTableDescriptionSupplier.NAME;
     private List<File> resourceConfigFiles = ImmutableList.of();
@@ -137,6 +140,33 @@ public class KafkaConfig
     public KafkaConfig setMessagesPerSplit(int messagesPerSplit)
     {
         this.messagesPerSplit = messagesPerSplit;
+        return this;
+    }
+
+    public boolean isRequireFilter()
+    {
+        return requireFilter;
+    }
+
+    @Config("kafka.require-filter")
+    @ConfigDescription("Require a WHERE clause before reading from Kafka topics")
+    public KafkaConfig setRequireFilter(boolean requireFilter)
+    {
+        this.requireFilter = requireFilter;
+        return this;
+    }
+
+    @Min(0)
+    public long getMaxReadOffsets()
+    {
+        return maxReadOffsets;
+    }
+
+    @Config("kafka.max-read-offsets")
+    @ConfigDescription("Maximum number of Kafka offsets a query may scan before failing. Set to 0 to disable")
+    public KafkaConfig setMaxReadOffsets(long maxReadOffsets)
+    {
+        this.maxReadOffsets = maxReadOffsets;
         return this;
     }
 

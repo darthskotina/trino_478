@@ -73,6 +73,8 @@ public final class KafkaQueryRunner
         return new Builder(TPCH_SCHEMA, false)
                 .addConnectorProperties(Map.of(
                         "kafka.nodes", testingKafka.getConnectString(),
+                        "kafka.require-filter", "false",
+                        "kafka.max-read-offsets", "0",
                         "kafka.messages-per-split", "1000",
                         "kafka.table-description-supplier", TEST));
     }
@@ -82,6 +84,8 @@ public final class KafkaQueryRunner
         return new Builder("default", true)
                 .addConnectorProperties(Map.of(
                         "kafka.nodes", testingKafka.getConnectString(),
+                        "kafka.require-filter", "false",
+                        "kafka.max-read-offsets", "0",
                         "kafka.messages-per-split", "1000",
                         "kafka.table-description-supplier", "confluent",
                         "kafka.confluent-schema-registry-url", testingKafka.getSchemaRegistryConnectString(),

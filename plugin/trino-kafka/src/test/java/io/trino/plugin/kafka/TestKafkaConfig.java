@@ -41,9 +41,12 @@ public class TestKafkaConfig
                 .setTableDescriptionSupplier(FileTableDescriptionSupplier.NAME)
                 .setHideInternalColumns(true)
                 .setMessagesPerSplit(100_000)
+                .setRequireFilter(true)
+                .setMaxReadOffsets(100_000)
                 .setTimestampUpperBoundPushDownEnabled(false)
                 .setResourceConfigFiles(List.of())
-                .setInternalFieldPrefix("_"));
+                .setInternalFieldPrefix("_")
+                .setConsumerGroupId("bigdata-spark-streaming"));
     }
 
     @Test
@@ -60,9 +63,12 @@ public class TestKafkaConfig
                 .put("kafka.buffer-size", "1MB")
                 .put("kafka.hide-internal-columns", "false")
                 .put("kafka.messages-per-split", "1")
+                .put("kafka.require-filter", "false")
+                .put("kafka.max-read-offsets", "42")
                 .put("kafka.timestamp-upper-bound-force-push-down-enabled", "true")
                 .put("kafka.config.resources", resource1.toString() + "," + resource2.toString())
                 .put("kafka.internal-column-prefix", "the_most_unexpected_prefix_")
+                .put("kafka.consumer-group-id", "my-custom-consumer-group")
                 .buildOrThrow();
 
         KafkaConfig expected = new KafkaConfig()
@@ -72,9 +78,12 @@ public class TestKafkaConfig
                 .setKafkaBufferSize("1MB")
                 .setHideInternalColumns(false)
                 .setMessagesPerSplit(1)
+                .setRequireFilter(false)
+                .setMaxReadOffsets(42)
                 .setTimestampUpperBoundPushDownEnabled(true)
                 .setResourceConfigFiles(ImmutableList.of(resource1.toString(), resource2.toString()))
-                .setInternalFieldPrefix("the_most_unexpected_prefix_");
+                .setInternalFieldPrefix("the_most_unexpected_prefix_")
+                .setConsumerGroupId("my-custom-consumer-group");
 
         assertFullMapping(properties, expected);
     }

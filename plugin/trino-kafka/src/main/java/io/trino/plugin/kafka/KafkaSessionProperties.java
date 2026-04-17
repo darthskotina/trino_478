@@ -21,25 +21,53 @@ import io.trino.spi.session.PropertyMetadata;
 
 import java.util.List;
 
+import static io.trino.spi.session.PropertyMetadata.longProperty;
+import static java.lang.String.format;
+
 public final class KafkaSessionProperties
         implements SessionPropertiesProvider
 {
+    private static final String REQUIRE_FILTER = "require_filter";
+    private static final String MAX_READ_OFFSETS = "max_read_offsets";
     private static final String TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED = "timestamp_upper_bound_force_push_down_enabled";
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
     public KafkaSessionProperties(KafkaConfig kafkaConfig)
     {
-        sessionProperties = ImmutableList.of(PropertyMetadata.booleanProperty(
-                TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED,
-                "Enable or disable timestamp upper bound push down for topic createTime mode",
-                kafkaConfig.isTimestampUpperBoundPushDownEnabled(), false));
+        sessionProperties = ImmutableList.of(
+                PropertyMetadata.booleanProperty(
+                        REQUIRE_FILTER,
+                        "Require a WHERE clause before reading from Kafka topics",
+                        kafkaConfig.isRequireFilter(),
+                        false),
+                longProperty(
+                        MAX_READ_OFFSETS,
+                        "Maximum number of Kafka offsets a query may scan before failing. Set to 0 to disable",
+                        kafkaConfig.getMaxReadOffsets(),
+                        value -> validateNonNegativeLongValue(value, MAX_READ_OFFSETS),
+                        false),
+                PropertyMetadata.booleanProperty(
+                        TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED,
+                        "Enable or disable timestamp upper bound push down for topic createTime mode",
+                        kafkaConfig.isTimestampUpperBoundPushDownEnabled(),
+                        false));
     }
 
     @Override
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    public static boolean isRequireFilter(ConnectorSession session)
+    {
+        return session.getProperty(REQUIRE_FILTER, Boolean.class);
+    }
+
+    public static long getMaxReadOffsets(ConnectorSession session)
+    {
+        return session.getProperty(MAX_READ_OFFSETS, Long.class);
     }
 
     /**
@@ -52,5 +80,12 @@ public final class KafkaSessionProperties
     public static boolean isTimestampUpperBoundPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED, Boolean.class);
+    }
+
+    private static void validateNonNegativeLongValue(long value, String propertyName)
+    {
+        if (value < 0) {
+            throw new IllegalArgumentException(format("%s must be greater than or equal to 0", propertyName));
+        }
     }
 }
