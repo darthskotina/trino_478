@@ -3,8 +3,9 @@
 ## Goal
 
 Introduce a new Kafka connector session property that keeps the current default
-behavior in committed-read mode, but can be disabled at runtime to allow reads
-from offsets earlier than the consumer group's currently committed offset.
+behavior in committed-read mode by default, but can be enabled at runtime to
+allow reads from offsets earlier than the consumer group's currently committed
+offset.
 
 When the new property allows rewind:
 
@@ -345,7 +346,7 @@ Required updates:
 - current docs explicitly say committed-read mode rejects lower-bound
   `_partition_offset` predicates
 - introduce the new flag and explain the default
-- explain that disabling the flag changes committed-read semantics from strict
+- explain that enabling the flag changes committed-read semantics from strict
   resume behavior to filter-relative checkpoint behavior for offset predicates
 - state clearly that rewind support is for `_partition_offset` only in this
   iteration
@@ -408,3 +409,7 @@ Why it is not trivial:
 - subsequent committed-read queries under the same group resume from the
   rewound offset
 - broker-backed tests prove the stored group offset actually moves as intended
+- the existing repeated-scan/self-join guard remains active for committed-read
+  rewind mode
+- committed-read rewind documentation explicitly carries forward the operational
+  requirement that Trino `retry_policy=NONE`
