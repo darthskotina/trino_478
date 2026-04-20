@@ -23,13 +23,17 @@ import io.trino.spi.connector.ConnectorRecordSetProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.function.FunctionProvider;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.spi.transaction.IsolationLevel.READ_COMMITTED;
 import static io.trino.spi.transaction.IsolationLevel.checkConnectorSupports;
 import static java.util.Objects.requireNonNull;
@@ -43,6 +47,8 @@ public class KafkaConnector
     private final ConnectorRecordSetProvider recordSetProvider;
     private final ConnectorPageSinkProvider pageSinkProvider;
     private final List<PropertyMetadata<?>> sessionProperties;
+    private final Set<ConnectorTableFunction> tableFunctions;
+    private final FunctionProvider functionProvider;
 
     @Inject
     public KafkaConnector(
@@ -51,7 +57,9 @@ public class KafkaConnector
             ConnectorSplitManager splitManager,
             ConnectorRecordSetProvider recordSetProvider,
             ConnectorPageSinkProvider pageSinkProvider,
-            Set<SessionPropertiesProvider> sessionProperties)
+            Set<SessionPropertiesProvider> sessionProperties,
+            Set<ConnectorTableFunction> tableFunctions,
+            FunctionProvider functionProvider)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
@@ -61,6 +69,9 @@ public class KafkaConnector
         this.sessionProperties = sessionProperties.stream()
                 .flatMap(sessionPropertiesProvider -> sessionPropertiesProvider.getSessionProperties().stream())
                 .collect(toImmutableList());
+        this.tableFunctions = requireNonNull(tableFunctions, "tableFunctions is null").stream()
+                .collect(toImmutableSet());
+        this.functionProvider = requireNonNull(functionProvider, "functionProvider is null");
     }
 
     @Override
@@ -98,6 +109,18 @@ public class KafkaConnector
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    @Override
+    public Set<ConnectorTableFunction> getTableFunctions()
+    {
+        return tableFunctions;
+    }
+
+    @Override
+    public Optional<FunctionProvider> getFunctionProvider()
+    {
+        return Optional.of(functionProvider);
     }
 
     @Override

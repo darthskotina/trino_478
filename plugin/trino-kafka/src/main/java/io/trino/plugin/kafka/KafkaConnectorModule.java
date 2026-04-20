@@ -17,6 +17,7 @@ import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.plugin.kafka.ptf.OffsetBoundsFunction;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorRecordSetProvider;
@@ -31,6 +32,8 @@ import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
+import io.trino.spi.function.FunctionProvider;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.type.TypeManager;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
@@ -65,11 +68,16 @@ public class KafkaConnectorModule
         binder.bind(KafkaSessionProperties.class).in(Scopes.SINGLETON);
         binder.bind(KafkaFilterManager.class).in(Scopes.SINGLETON);
         binder.bind(KafkaCommittedReadRegistry.class).in(Scopes.SINGLETON);
+        binder.bind(KafkaOffsetBoundsService.class).in(Scopes.SINGLETON);
+        binder.bind(KafkaOffsetBoundsProcessorProvider.class).in(Scopes.SINGLETON);
+        binder.bind(KafkaFunctionProvider.class).in(Scopes.SINGLETON);
+        binder.bind(FunctionProvider.class).to(KafkaFunctionProvider.class).in(Scopes.SINGLETON);
 
         configBinder(binder).bindConfig(KafkaConfig.class);
         bindTopicSchemaProviderModule(FileTableDescriptionSupplier.NAME, new FileTableDescriptionSupplierModule());
         bindTopicSchemaProviderModule(ConfluentSchemaRegistryTableDescriptionSupplier.NAME, new ConfluentModule(typeManager));
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(KafkaSessionProperties.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(OffsetBoundsFunction.class).in(Scopes.SINGLETON);
         jsonCodecBinder(binder).bindJsonCodec(KafkaTopicDescription.class);
     }
 

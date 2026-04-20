@@ -26,6 +26,7 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -53,6 +54,7 @@ public class KafkaSplitManager
     private final KafkaFilterManager kafkaFilterManager;
     private final ContentSchemaProvider contentSchemaProvider;
     private final KafkaCommittedReadRegistry committedReadRegistry;
+    private final KafkaOffsetBoundsService offsetBoundsService;
     private final int messagesPerSplit;
     private final KafkaCommittedReadMissingOffsetPolicy missingOffsetPolicy;
 
@@ -63,7 +65,8 @@ public class KafkaSplitManager
             KafkaConfig kafkaConfig,
             KafkaFilterManager kafkaFilterManager,
             ContentSchemaProvider contentSchemaProvider,
-            KafkaCommittedReadRegistry committedReadRegistry)
+            KafkaCommittedReadRegistry committedReadRegistry,
+            KafkaOffsetBoundsService offsetBoundsService)
     {
         this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
         this.adminFactory = requireNonNull(adminFactory, "adminFactory is null");
@@ -71,6 +74,7 @@ public class KafkaSplitManager
         this.kafkaFilterManager = requireNonNull(kafkaFilterManager, "kafkaFilterManager is null");
         this.contentSchemaProvider = requireNonNull(contentSchemaProvider, "contentSchemaProvider is null");
         this.committedReadRegistry = requireNonNull(committedReadRegistry, "committedReadRegistry is null");
+        this.offsetBoundsService = requireNonNull(offsetBoundsService, "offsetBoundsService is null");
         this.missingOffsetPolicy = requireNonNull(kafkaConfig.getCommittedReadMissingOffsetPolicy(), "missingOffsetPolicy is null");
     }
 
@@ -89,15 +93,11 @@ public class KafkaSplitManager
 
         committedReadGroupId.ifPresent(groupId -> committedReadRegistry.register(session.getQueryId(), groupId, kafkaTableHandle.topicName()));
 
-        try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.create(session)) {
-            List<PartitionInfo> partitionInfos = kafkaConsumer.partitionsFor(kafkaTableHandle.topicName());
-
-            List<TopicPartition> topicPartitions = partitionInfos.stream()
-                    .map(KafkaSplitManager::toTopicPartition)
-                    .collect(toImmutableList());
-
-            Map<TopicPartition, Long> partitionBeginOffsets = kafkaConsumer.beginningOffsets(topicPartitions);
-            Map<TopicPartition, Long> partitionEndOffsets = kafkaConsumer.endOffsets(topicPartitions);
+        try {
+            KafkaOffsetBoundsService.TopicPartitionOffsets topicPartitionOffsets = offsetBoundsService.getTopicPartitionOffsets(session, kafkaTableHandle.topicName(), Optional.empty());
+            List<PartitionInfo> partitionInfos = topicPartitionOffsets.partitionInfos();
+            Map<TopicPartition, Long> partitionBeginOffsets = topicPartitionOffsets.beginningOffsets();
+            Map<TopicPartition, Long> partitionEndOffsets = topicPartitionOffsets.endOffsets();
             Map<TopicPartition, Long> partitionLogStartOffsets = partitionBeginOffsets;
             Map<TopicPartition, Long> partitionLogEndOffsets = partitionEndOffsets;
             KafkaFilteringResult kafkaFilteringResult = kafkaFilterManager.getKafkaFilterResult(session, kafkaTableHandle,
@@ -115,7 +115,7 @@ public class KafkaSplitManager
                     .orElse(Map.of());
 
             for (PartitionInfo partitionInfo : partitionInfos) {
-                TopicPartition topicPartition = toTopicPartition(partitionInfo);
+                TopicPartition topicPartition = KafkaOffsetBoundsService.toTopicPartition(partitionInfo);
                 HostAddress leader = HostAddress.fromParts(partitionInfo.leader().host(), partitionInfo.leader().port());
                 if (!committedReadMode) {
                     new Range(partitionBeginOffsets.get(topicPartition), partitionEndOffsets.get(topicPartition))
@@ -166,9 +166,16 @@ public class KafkaSplitManager
         }
     }
 
-    private static TopicPartition toTopicPartition(PartitionInfo partitionInfo)
+    @Override
+    public ConnectorSplitSource getSplits(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorTableFunctionHandle function)
     {
-        return new TopicPartition(partitionInfo.topic(), partitionInfo.partition());
+        if (function instanceof KafkaOffsetBoundsFunctionHandle offsetBoundsHandle) {
+            return new FixedSplitSource(offsetBoundsService.getOffsetBounds(session, offsetBoundsHandle.schemaTableName(), offsetBoundsHandle.topicName(), offsetBoundsHandle.partition())
+                    .stream()
+                    .map(KafkaOffsetBoundsSplit::new)
+                    .collect(toImmutableList()));
+        }
+        throw new UnsupportedOperationException("Unrecognized function: " + function);
     }
 
     private static Optional<Long> getExplicitPartitionOffsetLowerBound(KafkaTableHandle tableHandle)

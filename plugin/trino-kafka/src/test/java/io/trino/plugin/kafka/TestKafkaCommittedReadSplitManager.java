@@ -16,6 +16,7 @@ package io.trino.plugin.kafka;
 import io.trino.decoder.dummy.DummyRowDecoder;
 import io.trino.plugin.kafka.KafkaInternalFieldManager.InternalFieldId;
 import io.trino.plugin.kafka.schema.ContentSchemaProvider;
+import io.trino.plugin.kafka.schema.MapBasedTableDescriptionSupplier;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.Constraint;
@@ -273,7 +274,8 @@ public class TestKafkaCommittedReadSplitManager
                 return Optional.empty();
             }
         };
-        return new KafkaSplitManager(consumerFactory, adminFactory, config, filterManager, schemaProvider, new KafkaCommittedReadRegistry());
+        KafkaOffsetBoundsService offsetBoundsService = new KafkaOffsetBoundsService(consumerFactory, new MapBasedTableDescriptionSupplier(Map.of()));
+        return new KafkaSplitManager(consumerFactory, adminFactory, config, filterManager, schemaProvider, new KafkaCommittedReadRegistry(), offsetBoundsService);
     }
 
     private static ConnectorSession committedReadSession(KafkaConfig config, String groupId)
