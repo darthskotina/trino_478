@@ -42,7 +42,7 @@ If a user wants a topic-level summary, they can derive it with SQL:
 SELECT
     min(log_start_offset) AS topic_min_log_start_offset,
     max(log_end_offset) AS topic_max_log_end_offset
-FROM TABLE(kafka.system.offsets(topic => 'orders'));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
 ```
 
 ## Current Codebase Context
@@ -76,14 +76,15 @@ Example invocation:
 
 ```sql
 SELECT *
-FROM TABLE(kafka.system.offsets(topic => 'orders'));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
 ```
 
 ### Arguments
 
 Required argument:
 
-- `topic VARCHAR`
+- `schema_name VARCHAR`
+- `table_name VARCHAR`
 
 Optional argument:
 
@@ -91,11 +92,12 @@ Optional argument:
 
 Chosen semantics:
 
-- `topic` identifies a Kafka topic that is already exposed by the connector's
-  metadata / table-description model
+- `(schema_name, table_name)` identifies a Kafka table that is already exposed
+  by the connector's metadata / table-description model
 - if `partition` is omitted, return one row per partition for the topic
 - if `partition` is provided, return exactly one row for that partition
-- if the topic is not connector-visible, fail before broker offset lookup
+- if the `(schema_name, table_name)` pair is not connector-visible, fail
+  before broker offset lookup
 - if the partition does not exist for the topic, fail with a clear user error
 
 ### Output Columns
@@ -122,14 +124,14 @@ Inspect all partitions:
 
 ```sql
 SELECT *
-FROM TABLE(kafka.system.offsets(topic => 'orders'));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
 ```
 
 Inspect one partition directly through the function parameter:
 
 ```sql
 SELECT *
-FROM TABLE(kafka.system.offsets(topic => 'orders', partition => 2));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders', partition => 2));
 ```
 
 Get only the topic-wide summary:
@@ -138,14 +140,14 @@ Get only the topic-wide summary:
 SELECT
     min(log_start_offset) AS topic_min_log_start_offset,
     max(log_end_offset) AS topic_max_log_end_offset
-FROM TABLE(kafka.system.offsets(topic => 'orders'));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
 ```
 
 Get the current last readable offset per partition:
 
 ```sql
 SELECT partition_id, last_readable_offset
-FROM TABLE(kafka.system.offsets(topic => 'orders'));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
 ```
 
 ### Visibility And Authorization Semantics
@@ -155,15 +157,18 @@ names.
 
 Chosen contract:
 
-- `topic` must resolve through the Kafka connector's existing metadata model
-- the function must not be a side channel for discovering topics that are not
-  exposed by the connector
+- `(schema_name, table_name)` must resolve through the Kafka connector's
+  existing metadata model
+- the function must not be a side channel for discovering Kafka topics that
+  are not exposed through connector tables
 - function analysis must perform explicit access-control checks for the
-  resolved connector topic
+  resolved connector table
+- required privilege is the same effective read privilege as selecting from
+  the resolved Kafka table
 
 This keeps the feature aligned with the current Kafka connector product model,
-where topics are exposed through connector metadata rather than by raw broker
-enumeration alone.
+where schema/table metadata defines the visible surface and maps to broker
+topic names.
 
 ## Metadata-Only Semantics
 
@@ -191,7 +196,7 @@ If the user writes:
 
 ```sql
 SELECT *
-FROM TABLE(kafka.system.offsets(topic => 'orders', partition => 2));
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders', partition => 2));
 ```
 
 the connector should narrow Kafka calls to that single requested partition
@@ -241,13 +246,16 @@ High-level pieces required:
 - a provider class for the function definition
 - a function handle carrying resolved arguments
 - connector wiring so `KafkaConnector#getTableFunctions()` returns the function
-- metadata wiring so `KafkaMetadata#applyTableFunction(...)` recognizes the
-  function handle and returns the function's output columns
 - connector wiring for `getFunctionProvider()` so the function can use the
   dedicated table-function processor path
 
 This plan does not use the ordinary Kafka table-scan runtime as the execution
 path for the function.
+
+`KafkaMetadata#applyTableFunction(...)` is not part of the chosen execution
+model for this function. If implemented for interface completeness, it must
+return `Optional.empty()` for the offset-bounds function handle so the planner
+does not rewrite the function into a `TableScanNode`.
 
 This is the largest implementation slice of the feature.
 
@@ -289,7 +297,8 @@ The connector already resolves topic partitions and begin/end offsets in
 Chosen refactor:
 
 - extract a small connector-local service or helper responsible for:
-  - resolving the connector-visible topic to its Kafka topic name
+  - resolving the connector-visible `(schema_name, table_name)` pair to its
+    Kafka topic name
   - resolving available partitions for a topic
   - validating an optional requested partition
   - fetching `beginningOffsets(...)` and `endOffsets(...)` for the requested
@@ -305,7 +314,7 @@ Helper responsibilities:
 
 - input:
   - `ConnectorSession`
-  - connector-visible topic identifier
+  - connector-visible `(schema_name, table_name)` identifier
   - optional partition id
 - output:
   - ordered partition metadata rows or records containing:
@@ -340,12 +349,15 @@ The plan fixes validation and resolution timing as follows.
 
 Perform at function analysis time:
 
-- null / blank `topic` validation
+- null / blank `schema_name` validation
+- null / blank `table_name` validation
 - `partition` type and range validation
 - reject `partition < 0`
 - reject `partition > Integer.MAX_VALUE`
-- resolve the requested topic through the connector-visible metadata model
-- explicit access-control checks for the resolved topic
+- resolve the requested `(schema_name, table_name)` pair through the
+  connector-visible metadata model
+- explicit access-control checks for the resolved table using the same
+  effective privilege as selecting from that Kafka table
 
 This keeps syntax, visibility, and authorization failures early and stable.
 
@@ -353,7 +365,7 @@ This keeps syntax, visibility, and authorization failures early and stable.
 
 Perform during the function split-generation path:
 
-- live broker partition discovery for the resolved Kafka topic
+- live broker partition discovery for the resolved Kafka topic name
 - validation that the requested partition currently exists
 - `beginningOffsets(...)` / `endOffsets(...)` lookup
 
@@ -364,8 +376,9 @@ used for result production.
 
 Required validations:
 
-- `topic` must be non-null and non-blank
-- `topic` must resolve to a connector-visible Kafka topic
+- `schema_name` must be non-null and non-blank
+- `table_name` must be non-null and non-blank
+- `(schema_name, table_name)` must resolve to a connector-visible Kafka table
 - if `partition` is provided:
   - it must be non-negative
   - it must be less than or equal to `Integer.MAX_VALUE`
@@ -374,7 +387,7 @@ Required validations:
 Failure handling rules:
 
 - clear distinction between:
-  - unknown or non-visible connector topic
+  - unknown or non-visible connector table
   - invalid partition argument
   - broker lookup failure
 
@@ -425,7 +438,7 @@ Finalize:
 - schema name
 - argument names and types
 - output column names and meanings
-- connector-visible topic semantics
+- connector-visible schema/table semantics
 - authorization semantics
 - failure cases
 
@@ -449,11 +462,12 @@ Add a dedicated function provider and handle class.
 
 Required outcome:
 
-- the function accepts `topic`
+- the function accepts `schema_name`
+- the function accepts `table_name`
 - the function optionally accepts `partition`
 - analysis produces a stable output descriptor and handle
 
-## Step 4. Extend Metadata To Apply The Function
+## Step 4. Extend Metadata Only For Topic Resolution Support
 
 Files likely involved:
 
@@ -461,9 +475,10 @@ Files likely involved:
 
 Required outcome:
 
-- metadata recognizes the function handle
-- metadata returns output columns for the function application
-- metadata does not introduce a second ordinary Kafka table-scan handle path
+- metadata provides the schema/table-to-topic resolution needed by function
+  analysis
+- `applyTableFunction(...)` is not used for this function's execution path and
+  must not trigger rewrite to a table scan
 
 ## Step 5. Implement Broker Offset Lookup Helper
 
@@ -474,7 +489,7 @@ Files likely involved:
 
 Required outcome:
 
-- connector-visible topic resolution
+- connector-visible schema/table resolution
 - all-partitions lookup path
 - single-partition lookup path
 - stable validation and ordering
@@ -532,19 +547,33 @@ metadata is then used for partition validation and offset lookup.
 This preserves the connector's existing topic exposure model while still using
 live broker state for current partition and offset information.
 
+### Authorization Scope
+
+The function requires the same effective read privilege as selecting from the
+resolved Kafka table.
+
+This is a product-level rule:
+
+- the function is not a weaker metadata-only privilege
+- the function is not broader than ordinary table read access
+- implementation should use the connector access-control API in a way that
+  enforces table-read semantics for the resolved `(schema_name, table_name)`
+  target
+
 ## Test Plan
 
 ### Unit / Connector-Level Tests
 
 Add focused tests for:
 
-- function analysis with `topic` only
-- function analysis with `topic` and `partition`
-- invalid blank topic
+- function analysis with `schema_name` and `table_name`
+- function analysis with `schema_name`, `table_name`, and `partition`
+- invalid blank schema name
+- invalid blank table name
 - invalid negative partition
 - invalid partition above `Integer.MAX_VALUE`
-- connector-non-visible topic rejection
-- access-control rejection
+- connector-non-visible table rejection
+- access-control rejection using the same privilege model as table reads
 - output descriptor shape
 - table-function wiring registration
 - handle and split serialization coverage for the table-function path
@@ -563,7 +592,9 @@ Add broker-backed tests for:
 - retained topic where log start has advanced above zero returns the advanced
   low watermark correctly
 - topic-level SQL aggregation over the function returns expected derived values
-- connector-visible topic succeeds while a non-exposed broker topic is not
+- a table whose `table_name` differs from Kafka `topicName` still resolves and
+  returns the broker offsets for the mapped topic
+- connector-visible table succeeds while a non-exposed broker topic is not
   reachable through the function, if the test fixture can represent both states
 
 ### Regression Tests For Semantics
@@ -620,15 +651,20 @@ This plan fixes the following decisions:
 - use a connector table function, not hidden columns or a system table
 - keep the function in schema `system`
 - name the function `offsets`
-- require `topic VARCHAR` scoped to connector-visible topics
+- require `schema_name VARCHAR` and `table_name VARCHAR`
 - support optional `partition BIGINT`
 - reject `partition` values above `Integer.MAX_VALUE`
 - perform explicit access-control checks during function analysis
-- use live broker metadata only after connector-visible topic resolution
+- require the same effective privilege as selecting from the resolved Kafka
+  table
+- use live broker metadata only after connector-visible schema/table
+  resolution
 - narrow `beginningOffsets(...)` and `endOffsets(...)` to the requested
   partition set when `partition` is provided
 - use the dedicated table-function processor path, not the ordinary Kafka
   table-scan path
+- do not use `applyTableFunction(...)` to rewrite this function into a table
+  scan
 - expose broker bounds only in v1
 - report connector-consumer-visible offset bounds under the effective Kafka
   client configuration
@@ -638,17 +674,20 @@ This plan fixes the following decisions:
 
 The feature is complete when:
 
-- a user can query all partitions for a topic through a Kafka table function
+- a user can query all partitions for a connector-visible Kafka table through a
+  Kafka table function
 - a user can query one explicit partition through the optional `partition`
   argument
-- the function works only for connector-visible topics
-- access control is enforced explicitly during function analysis
+- the function works only for connector-visible schema/table pairs
+- access control is enforced explicitly during function analysis using the same
+  effective privilege as table reads
 - the connector narrows `beginningOffsets(...)` and `endOffsets(...)` to the
   requested partition set when `partition` is provided
 - no Kafka topic data scan is performed
 - no consumer `poll(...)` or row decoder path is used
 - the result schema clearly distinguishes inclusive start from exclusive end
 - invalid topic/partition inputs fail clearly
+- schema/table aliases to Kafka topic names are handled correctly
 - tests cover empty partitions, advanced log start, visibility/access rules,
   table-function wiring/serialization, and single-partition narrowing behavior
 - documentation includes example queries and explains that the function returns
