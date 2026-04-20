@@ -17,6 +17,8 @@ reads or committed-read mode.
 - no changes to row-reading behavior for Kafka tables
 - no changes to committed-read planning or commit behavior
 - no new hidden/internal columns on Kafka tables
+- no exposure of arbitrary broker topics outside the connector's existing topic
+  visibility model
 - no topic-wide synthetic single-offset abstraction that hides partition
   boundaries
 - no support for multiple partition arguments in the first iteration
@@ -89,8 +91,11 @@ Optional argument:
 
 Chosen semantics:
 
+- `topic` identifies a Kafka topic that is already exposed by the connector's
+  metadata / table-description model
 - if `partition` is omitted, return one row per partition for the topic
 - if `partition` is provided, return exactly one row for that partition
+- if the topic is not connector-visible, fail before broker offset lookup
 - if the partition does not exist for the topic, fail with a clear user error
 
 ### Output Columns
@@ -143,6 +148,23 @@ SELECT partition_id, last_readable_offset
 FROM TABLE(kafka.system.offsets(topic => 'orders'));
 ```
 
+### Visibility And Authorization Semantics
+
+This function is scoped to connector-visible topics, not arbitrary broker topic
+names.
+
+Chosen contract:
+
+- `topic` must resolve through the Kafka connector's existing metadata model
+- the function must not be a side channel for discovering topics that are not
+  exposed by the connector
+- function analysis must perform explicit access-control checks for the
+  resolved connector topic
+
+This keeps the feature aligned with the current Kafka connector product model,
+where topics are exposed through connector metadata rather than by raw broker
+enumeration alone.
+
 ## Metadata-Only Semantics
 
 This feature must be explicitly documented as a metadata lookup, not a topic
@@ -183,6 +205,30 @@ This avoids an API shape where:
 The optional parameter therefore improves both usability and operational
 behavior for high-partition-count topics.
 
+Important nuance:
+
+- `partitionsFor(topic)` may still be used for live partition discovery and
+  validation
+- the narrowing requirement applies to `beginningOffsets(...)` and
+  `endOffsets(...)` after the requested partition set has been resolved
+
+### End-Offset Semantics And Consumer Configuration
+
+This function reports end offsets as seen through the connector's configured
+Kafka consumer settings.
+
+Chosen contract:
+
+- offset lookups use the connector's Kafka client configuration path
+- the function does not override consumer isolation or other client properties
+  to force a separate raw-broker view
+- documentation must describe the result as connector-consumer-visible offset
+  bounds under the effective Kafka client configuration
+
+This keeps the feature consistent with the connector's existing Kafka client
+behavior and avoids introducing a second, differently configured metadata
+surface.
+
 ## Final Architecture
 
 ## 1. Add A Kafka Connector Table Function
@@ -190,36 +236,52 @@ behavior for high-partition-count topics.
 Add the first table function to `trino-kafka` using the same general connector
 pattern used in plugins such as OpenSearch.
 
-High-level pieces likely required:
+High-level pieces required:
 
 - a provider class for the function definition
 - a function handle carrying resolved arguments
 - connector wiring so `KafkaConnector#getTableFunctions()` returns the function
-- metadata wiring so `KafkaMetadata#applyTableFunction(...)` maps the handle to
-  a connector table handle and output columns
+- metadata wiring so `KafkaMetadata#applyTableFunction(...)` recognizes the
+  function handle and returns the function's output columns
+- connector wiring for `getFunctionProvider()` so the function can use the
+  dedicated table-function processor path
+
+This plan does not use the ordinary Kafka table-scan runtime as the execution
+path for the function.
 
 This is the largest implementation slice of the feature.
 
-## 2. Introduce A Dedicated Table Handle For Offset-Bounds Reads
+## 2. Use The Dedicated Table-Function Runtime Path
 
-Do not overload existing Kafka table scans or committed-read handles.
+Do not route this feature through the ordinary Kafka table-scan path built
+around `KafkaTableHandle`, `KafkaSplit`, `KafkaColumnHandle`,
+`KafkaSplitManager#getSplits(..., ConnectorTableHandle, ...)`, and
+`KafkaRecordSetProvider`.
 
 Chosen approach:
 
-- define a dedicated handle representing an offset-bounds function invocation
-- include:
-  - topic name
-  - optional partition id
-- keep this logically separate from the ordinary `KafkaTableHandle` used for
-  message scans
+- define a dedicated `ConnectorTableFunctionHandle`
+- define a dedicated function split path using
+  `ConnectorSplitManager#getSplits(..., ConnectorTableFunctionHandle)`
+- define a dedicated `ConnectorSplit` type for offset-bounds work
+- provide rows through the table-function processor path exposed by
+  `FunctionProvider`
 
 Reason:
 
-- function execution is metadata-only and should stay isolated from message
-  scan semantics
-- a dedicated handle keeps planning and testing simpler
+- the current Kafka runtime hard-casts the normal scan path to Kafka-specific
+  table, split, and column handle types
+- forcing a second logical feature through that path would require broad
+  branching in metadata, split planning, and record-set production
+- the dedicated table-function runtime is a better fit for metadata-only row
+  generation and mirrors patterns already used elsewhere in the repo
 
-## 3. Factor Out Broker Offset Lookup
+Implementation consequence:
+
+- any function handle and split classes used in this path must be serializable
+  in the same way other distributed connector handles and splits are
+
+## 3. Factor Out Broker Offset Lookup And Topic Resolution
 
 The connector already resolves topic partitions and begin/end offsets in
 `KafkaSplitManager`.
@@ -227,6 +289,7 @@ The connector already resolves topic partitions and begin/end offsets in
 Chosen refactor:
 
 - extract a small connector-local service or helper responsible for:
+  - resolving the connector-visible topic to its Kafka topic name
   - resolving available partitions for a topic
   - validating an optional requested partition
   - fetching `beginningOffsets(...)` and `endOffsets(...)` for the requested
@@ -242,7 +305,7 @@ Helper responsibilities:
 
 - input:
   - `ConnectorSession`
-  - topic name
+  - connector-visible topic identifier
   - optional partition id
 - output:
   - ordered partition metadata rows or records containing:
@@ -267,21 +330,51 @@ the Kafka connector best, but this invariant is fixed:
 
 - the function returns broker metadata rows only
 - it does not reuse message-polling execution paths
+- it does not invoke `poll(...)` or any row decoder path
+
+## 5. Split Responsibilities By Phase
+
+The plan fixes validation and resolution timing as follows.
+
+### Analyze Phase
+
+Perform at function analysis time:
+
+- null / blank `topic` validation
+- `partition` type and range validation
+- reject `partition < 0`
+- reject `partition > Integer.MAX_VALUE`
+- resolve the requested topic through the connector-visible metadata model
+- explicit access-control checks for the resolved topic
+
+This keeps syntax, visibility, and authorization failures early and stable.
+
+### Split Generation / Execution-Planning Phase
+
+Perform during the function split-generation path:
+
+- live broker partition discovery for the resolved Kafka topic
+- validation that the requested partition currently exists
+- `beginningOffsets(...)` / `endOffsets(...)` lookup
+
+This keeps live broker-state validation aligned with the actual offset snapshot
+used for result production.
 
 ## Validation Rules
 
 Required validations:
 
 - `topic` must be non-null and non-blank
-- the topic must exist
+- `topic` must resolve to a connector-visible Kafka topic
 - if `partition` is provided:
   - it must be non-negative
+  - it must be less than or equal to `Integer.MAX_VALUE`
   - it must exist in the topic's current partition set
 
 Failure handling rules:
 
 - clear distinction between:
-  - unknown topic
+  - unknown or non-visible connector topic
   - invalid partition argument
   - broker lookup failure
 
@@ -332,6 +425,8 @@ Finalize:
 - schema name
 - argument names and types
 - output column names and meanings
+- connector-visible topic semantics
+- authorization semantics
 - failure cases
 
 These choices are locked by this plan so tests and docs align from the start.
@@ -346,6 +441,7 @@ Files likely involved:
 Required outcome:
 
 - the connector advertises the new table function
+- the connector exposes a `FunctionProvider` for the function processor path
 
 ## Step 3. Add Function Definition And Handle
 
@@ -366,7 +462,8 @@ Files likely involved:
 Required outcome:
 
 - metadata recognizes the function handle
-- metadata maps it to the execution path and output columns
+- metadata returns output columns for the function application
+- metadata does not introduce a second ordinary Kafka table-scan handle path
 
 ## Step 5. Implement Broker Offset Lookup Helper
 
@@ -377,6 +474,7 @@ Files likely involved:
 
 Required outcome:
 
+- connector-visible topic resolution
 - all-partitions lookup path
 - single-partition lookup path
 - stable validation and ordering
@@ -385,11 +483,13 @@ Required outcome:
 
 Required outcome:
 
+- use the dedicated table-function processor path
 - return one row per requested partition
 - populate `partition_id`, `log_start_offset`, `log_end_offset`,
   `last_readable_offset`
 - ensure the `partition` argument narrows the Kafka request set rather than
   filtering only after row production
+- ensure no `KafkaRecordSetProvider` / decoder / consumer-poll path is used
 
 ## Step 7. Add Tests And Documentation
 
@@ -403,12 +503,16 @@ Required outcome:
 
 ### Ordering
 
-Return rows ordered by `partition_id` ascending.
+The implementation should emit rows sorted by `partition_id` ascending when
+convenient for determinism, but this is not a user-facing semantic guarantee.
 
 Reason:
 
 - stable output makes tests deterministic
-- users inspecting the function output get predictable ordering
+- Trino does not guarantee row order without `ORDER BY`
+
+Documentation and tests must therefore use `ORDER BY partition_id` whenever
+deterministic ordering is required.
 
 ### Type Choice For `partition`
 
@@ -422,11 +526,11 @@ This is a deliberate v1 constraint:
 
 ### Topic Validation Source
 
-Topic existence and partition validation should be based on the live Kafka
-metadata returned for the topic at execution time.
+Topic visibility must be resolved through connector metadata first. Live Kafka
+metadata is then used for partition validation and offset lookup.
 
-This avoids creating a separate connector-side registry for topic metadata and
-keeps behavior aligned with the broker snapshot used for the offset lookup.
+This preserves the connector's existing topic exposure model while still using
+live broker state for current partition and offset information.
 
 ## Test Plan
 
@@ -438,8 +542,12 @@ Add focused tests for:
 - function analysis with `topic` and `partition`
 - invalid blank topic
 - invalid negative partition
-- unknown partition rejection
+- invalid partition above `Integer.MAX_VALUE`
+- connector-non-visible topic rejection
+- access-control rejection
 - output descriptor shape
+- table-function wiring registration
+- handle and split serialization coverage for the table-function path
 
 ### Integration Tests With `TestingKafka`
 
@@ -448,12 +556,15 @@ Add broker-backed tests for:
 - single-partition topic returns one row
 - multi-partition topic returns one row per partition
 - `partition => x` returns only the requested partition
+- unknown live partition fails during split generation / execution planning
 - empty partition returns:
   - `log_start_offset == log_end_offset`
   - `last_readable_offset IS NULL`
 - retained topic where log start has advanced above zero returns the advanced
   low watermark correctly
 - topic-level SQL aggregation over the function returns expected derived values
+- connector-visible topic succeeds while a non-exposed broker topic is not
+  reachable through the function, if the test fixture can represent both states
 
 ### Regression Tests For Semantics
 
@@ -462,7 +573,9 @@ Explicitly verify:
 - no data scan semantics are required for correctness
 - `log_end_offset` remains exclusive
 - `last_readable_offset` is computed correctly
-- single-partition parameter path narrows the requested Kafka partition set
+- `beginningOffsets(...)` and `endOffsets(...)` narrow to the requested
+  partition set after topic partition discovery
+- no `poll(...)` / decoder path is used for the function runtime
 
 The last item is especially important because the user-facing reason for
 supporting optional `partition` in v1 is to avoid unnecessary all-partition
@@ -507,14 +620,19 @@ This plan fixes the following decisions:
 - use a connector table function, not hidden columns or a system table
 - keep the function in schema `system`
 - name the function `offsets`
-- require `topic VARCHAR`
+- require `topic VARCHAR` scoped to connector-visible topics
 - support optional `partition BIGINT`
-- narrow Kafka lookup to the requested partition set when `partition` is
-  provided
-- return one row per partition, ordered by `partition_id`
+- reject `partition` values above `Integer.MAX_VALUE`
+- perform explicit access-control checks during function analysis
+- use live broker metadata only after connector-visible topic resolution
+- narrow `beginningOffsets(...)` and `endOffsets(...)` to the requested
+  partition set when `partition` is provided
+- use the dedicated table-function processor path, not the ordinary Kafka
+  table-scan path
 - expose broker bounds only in v1
+- report connector-consumer-visible offset bounds under the effective Kafka
+  client configuration
 - keep topic-level summary as derived SQL, not as a separate function mode
-- use a dedicated offset-bounds handle rather than reusing `KafkaTableHandle`
 
 ## Acceptance Criteria
 
@@ -523,14 +641,19 @@ The feature is complete when:
 - a user can query all partitions for a topic through a Kafka table function
 - a user can query one explicit partition through the optional `partition`
   argument
-- the connector fetches only the requested partition set from Kafka
+- the function works only for connector-visible topics
+- access control is enforced explicitly during function analysis
+- the connector narrows `beginningOffsets(...)` and `endOffsets(...)` to the
+  requested partition set when `partition` is provided
 - no Kafka topic data scan is performed
+- no consumer `poll(...)` or row decoder path is used
 - the result schema clearly distinguishes inclusive start from exclusive end
 - invalid topic/partition inputs fail clearly
-- tests cover empty partitions, advanced log start, and single-partition
-  narrowing behavior
+- tests cover empty partitions, advanced log start, visibility/access rules,
+  table-function wiring/serialization, and single-partition narrowing behavior
 - documentation includes example queries and explains that the function returns
   metadata snapshots, not topic rows
+- documentation does not claim row-order guarantees without `ORDER BY`
 
 ## Explicitly Deferred Follow-Ups
 
