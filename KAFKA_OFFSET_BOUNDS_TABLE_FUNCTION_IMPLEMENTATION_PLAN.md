@@ -181,6 +181,9 @@ This is an intentional product choice, not an omission:
 - the function is narrower than arbitrary broker-topic inspection
 - the function is treated as metadata access on a connector-visible table
   object
+- analysis enforces this by calling
+  `ConnectorAccessControl.checkCanSelectFromColumns(...)` with the resolved
+  table and an empty column set
 
 ## Metadata-Only Semantics
 
@@ -368,8 +371,9 @@ Perform at function analysis time:
 - reject `partition > Integer.MAX_VALUE`
 - resolve the requested `(schema_name, table_name)` pair through the
   connector-visible metadata model
-- explicit access-control checks for the resolved table object using the
-  metadata-function authorization rule defined by this plan
+- explicit access-control checks for the resolved table object by calling
+  `ConnectorAccessControl.checkCanSelectFromColumns(...)` with an empty column
+  set, as defined by this plan
 
 This keeps syntax, visibility, and authorization failures early and stable.
 
@@ -572,9 +576,11 @@ This is a product-level rule:
 - column-level policies on Kafka payload columns do not restrict this function
 - this is an intentional choice because the function returns broker metadata,
   not table payload data
-- implementation should use the connector access-control API in a way that
-  enforces access to the resolved `(schema_name, table_name)` object without
-  depending on any specific payload-column set
+- implementation enforces this by calling
+  `ConnectorAccessControl.checkCanSelectFromColumns(...)` for the resolved
+  `(schema_name, table_name)` with an empty column set
+- this plan intentionally interprets an empty-column select check as the
+  authorization primitive for table-object-level metadata access
 
 ## Test Plan
 
@@ -590,6 +596,7 @@ Add focused tests for:
 - invalid partition above `Integer.MAX_VALUE`
 - connector-non-visible table rejection
 - access-control rejection for a non-accessible table object
+- success when `checkCanSelectFromColumns(..., emptySet())` is allowed
 - success for an accessible table object even when payload-column policies
   would block ordinary table reads
 - output descriptor shape
@@ -678,6 +685,8 @@ This plan fixes the following decisions:
 - intentionally allow the function when the user can access the connector-
   visible table object even if payload-column policies would restrict ordinary
   table reads
+- enforce authorization via
+  `ConnectorAccessControl.checkCanSelectFromColumns(..., emptySet())`
 - use live broker metadata only after connector-visible schema/table
   resolution
 - narrow `beginningOffsets(...)` and `endOffsets(...)` to the requested
@@ -702,6 +711,8 @@ The feature is complete when:
 - the function works only for connector-visible schema/table pairs
 - access control is enforced explicitly during function analysis using the
   plan's intentional table-object-level metadata authorization model
+- access control is enforced concretely via
+  `checkCanSelectFromColumns(..., emptySet())`
 - the connector narrows `beginningOffsets(...)` and `endOffsets(...)` to the
   requested partition set when `partition` is provided
 - no Kafka topic data scan is performed
