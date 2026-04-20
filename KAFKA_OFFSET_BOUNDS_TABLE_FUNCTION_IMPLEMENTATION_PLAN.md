@@ -163,12 +163,24 @@ Chosen contract:
   are not exposed through connector tables
 - function analysis must perform explicit access-control checks for the
   resolved connector table
-- required privilege is the same effective read privilege as selecting from
-  the resolved Kafka table
+- authorization is intentionally object-level rather than column-level
+- a user who is allowed to access the connector-visible Kafka table object may
+  call the function for that table
+- the function does not require column-level `SELECT` permission on message or
+  key columns, because it returns only broker offset metadata
+- column-level policies on Kafka table payload columns do not apply to this
+  function
 
 This keeps the feature aligned with the current Kafka connector product model,
 where schema/table metadata defines the visible surface and maps to broker
 topic names.
+
+This is an intentional product choice, not an omission:
+
+- the function is broader than ordinary payload-column read authorization
+- the function is narrower than arbitrary broker-topic inspection
+- the function is treated as metadata access on a connector-visible table
+  object
 
 ## Metadata-Only Semantics
 
@@ -356,8 +368,8 @@ Perform at function analysis time:
 - reject `partition > Integer.MAX_VALUE`
 - resolve the requested `(schema_name, table_name)` pair through the
   connector-visible metadata model
-- explicit access-control checks for the resolved table using the same
-  effective privilege as selecting from that Kafka table
+- explicit access-control checks for the resolved table object using the
+  metadata-function authorization rule defined by this plan
 
 This keeps syntax, visibility, and authorization failures early and stable.
 
@@ -549,16 +561,20 @@ live broker state for current partition and offset information.
 
 ### Authorization Scope
 
-The function requires the same effective read privilege as selecting from the
-resolved Kafka table.
+The function uses an intentionally table-object-level authorization model.
 
 This is a product-level rule:
 
-- the function is not a weaker metadata-only privilege
-- the function is not broader than ordinary table read access
+- a user who can access the connector-visible Kafka table object may call the
+  function for that table
+- the function does not require column-level `SELECT` permission on message or
+  key columns
+- column-level policies on Kafka payload columns do not restrict this function
+- this is an intentional choice because the function returns broker metadata,
+  not table payload data
 - implementation should use the connector access-control API in a way that
-  enforces table-read semantics for the resolved `(schema_name, table_name)`
-  target
+  enforces access to the resolved `(schema_name, table_name)` object without
+  depending on any specific payload-column set
 
 ## Test Plan
 
@@ -573,7 +589,9 @@ Add focused tests for:
 - invalid negative partition
 - invalid partition above `Integer.MAX_VALUE`
 - connector-non-visible table rejection
-- access-control rejection using the same privilege model as table reads
+- access-control rejection for a non-accessible table object
+- success for an accessible table object even when payload-column policies
+  would block ordinary table reads
 - output descriptor shape
 - table-function wiring registration
 - handle and split serialization coverage for the table-function path
@@ -655,8 +673,11 @@ This plan fixes the following decisions:
 - support optional `partition BIGINT`
 - reject `partition` values above `Integer.MAX_VALUE`
 - perform explicit access-control checks during function analysis
-- require the same effective privilege as selecting from the resolved Kafka
-  table
+- intentionally authorize at the connector-visible table-object level rather
+  than the payload-column level
+- intentionally allow the function when the user can access the connector-
+  visible table object even if payload-column policies would restrict ordinary
+  table reads
 - use live broker metadata only after connector-visible schema/table
   resolution
 - narrow `beginningOffsets(...)` and `endOffsets(...)` to the requested
@@ -679,8 +700,8 @@ The feature is complete when:
 - a user can query one explicit partition through the optional `partition`
   argument
 - the function works only for connector-visible schema/table pairs
-- access control is enforced explicitly during function analysis using the same
-  effective privilege as table reads
+- access control is enforced explicitly during function analysis using the
+  plan's intentional table-object-level metadata authorization model
 - the connector narrows `beginningOffsets(...)` and `endOffsets(...)` to the
   requested partition set when `partition` is provided
 - no Kafka topic data scan is performed
@@ -689,7 +710,8 @@ The feature is complete when:
 - invalid topic/partition inputs fail clearly
 - schema/table aliases to Kafka topic names are handled correctly
 - tests cover empty partitions, advanced log start, visibility/access rules,
-  table-function wiring/serialization, and single-partition narrowing behavior
+  intentional non-application of payload-column policies, table-function
+  wiring/serialization, and single-partition narrowing behavior
 - documentation includes example queries and explains that the function returns
   metadata snapshots, not topic rows
 - documentation does not claim row-order guarantees without `ORDER BY`
