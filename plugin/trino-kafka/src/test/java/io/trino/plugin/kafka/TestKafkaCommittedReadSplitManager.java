@@ -79,6 +79,200 @@ public class TestKafkaCommittedReadSplitManager
     }
 
     @Test
+    public void testDefaultModeUsesMessagePerSplitPlanning()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("default_mode_split_planning");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 5).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(2)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaSplitManager splitManager = splitManager(config);
+
+            List<KafkaSplit> splits = getSplits(splitManager, defaultSession(config), tableHandle(topicName, TupleDomain.all()));
+
+            assertThat(splits).hasSize(3);
+            assertThat(splits.get(0).getMessagesRange()).isEqualTo(new Range(0, 2));
+            assertThat(splits.get(1).getMessagesRange()).isEqualTo(new Range(2, 4));
+            assertThat(splits.get(2).getMessagesRange()).isEqualTo(new Range(4, 5));
+            assertThat(splits).allSatisfy(split -> assertThat(split.getCommittedReadSplitMetadata()).isEmpty());
+        }
+    }
+
+    @Test
+    public void testCommittedReadUsesDifferentCommittedOffsetsPerPartition()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("partition_specific_commits");
+            testingKafka.createTopicWithConfig(2, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 8).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            String groupId = "group-" + UUID.randomUUID();
+            setCommittedOffset(testingKafka, groupId, new TopicPartition(topicName, 0), 1L);
+            setCommittedOffset(testingKafka, groupId, new TopicPartition(topicName, 1), 3L);
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaSplitManager splitManager = splitManager(config);
+
+            List<KafkaSplit> splits = getSplits(splitManager, committedReadSession(config, groupId), tableHandle(topicName, TupleDomain.all()));
+
+            assertThat(splits).hasSize(2);
+            KafkaSplit partitionZero = splits.stream()
+                    .filter(split -> split.getPartitionId() == 0)
+                    .findFirst()
+                    .orElseThrow();
+            KafkaSplit partitionOne = splits.stream()
+                    .filter(split -> split.getPartitionId() == 1)
+                    .findFirst()
+                    .orElseThrow();
+
+            assertThat(partitionZero.getMessagesRange()).isEqualTo(new Range(1, 4));
+            assertThat(partitionOne.getMessagesRange()).isEqualTo(new Range(3, 4));
+            assertThat(partitionZero.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(partitionZero.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isFalse();
+            assertThat(partitionOne.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(partitionOne.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isFalse();
+        }
+    }
+
+    @Test
+    public void testCommittedReadRewindAppliesExplicitOffsetLowerBoundToEachPartition()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("rewind_lower_bound_all_partitions");
+            testingKafka.createTopicWithConfig(2, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 8).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            List<KafkaSplit> splits = getSplits(
+                    splitManager,
+                    committedReadRewindSession(config, "group-" + UUID.randomUUID()),
+                    tableHandle(
+                            topicName,
+                            partitionOffsetConstraint(
+                                    internalFieldManager,
+                                    io.trino.spi.predicate.Range.range(BIGINT, 2L, true, 4L, false))));
+
+            assertThat(splits).hasSize(2);
+            assertThat(splits)
+                    .allSatisfy(split -> {
+                        assertThat(split.getMessagesRange()).isEqualTo(new Range(2, 4));
+                        assertThat(split.getCommittedReadSplitMetadata()).isPresent();
+                        assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isFalse();
+                    });
+        }
+    }
+
+    @Test
+    public void testEarliestMissingOffsetPlansDataSplitFromLogStart()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("earliest_missing_offset");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 10).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            List<KafkaSplit> splits = getSplits(
+                    splitManager,
+                    committedReadSession(config, "group-" + UUID.randomUUID()),
+                    tableHandle(
+                            topicName,
+                            partitionOffsetConstraint(internalFieldManager, io.trino.spi.predicate.Range.lessThan(BIGINT, 5L))));
+
+            assertThat(splits).hasSize(1);
+            KafkaSplit split = splits.get(0);
+            assertThat(split.getMessagesRange()).isEqualTo(new Range(0, 5));
+            assertThat(split.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isFalse();
+        }
+    }
+
+    @Test
+    public void testEarliestInvalidCommittedOffsetUsesLogStartAsCommittedBase()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("earliest_invalid_offset");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 10).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            String groupId = "group-" + UUID.randomUUID();
+            setCommittedOffset(testingKafka, groupId, topicPartition, 2L);
+            advanceLogStart(testingKafka, topicPartition, 7L);
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaSplitManager splitManager = splitManager(config);
+
+            List<KafkaSplit> splits = getSplits(splitManager, committedReadSession(config, groupId), tableHandle(topicName, TupleDomain.all()));
+
+            assertThat(splits).hasSize(1);
+            KafkaSplit split = splits.get(0);
+            assertThat(split.getMessagesRange()).isEqualTo(new Range(7, 10));
+            assertThat(split.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isFalse();
+        }
+    }
+
+    @Test
+    public void testEarliestMissingOffsetRewindUsesExplicitLowerBound()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("earliest_rewind_missing_offset");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 10).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(1)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+
+            List<KafkaSplit> splits = getSplits(
+                    splitManager,
+                    committedReadRewindSession(config, "group-" + UUID.randomUUID()),
+                    tableHandle(
+                            topicName,
+                            partitionOffsetConstraint(
+                                    internalFieldManager,
+                                    io.trino.spi.predicate.Range.range(BIGINT, 3L, true, 5L, false))));
+
+            assertThat(splits).hasSize(1);
+            KafkaSplit split = splits.get(0);
+            assertThat(split.getMessagesRange()).isEqualTo(new Range(3, 5));
+            assertThat(split.getCommittedReadSplitMetadata()).isPresent();
+            assertThat(split.getCommittedReadSplitMetadata().orElseThrow().checkpointOnly()).isFalse();
+        }
+    }
+
+    @Test
     public void testLatestPlanningUsesCheckpointOnlySplitWithClampedCommitTarget()
             throws Exception
     {
@@ -285,6 +479,13 @@ public class TestKafkaCommittedReadSplitManager
                 .setPropertyValues(Map.of(
                         "committed_read_enabled", true,
                         "committed_read_group_id", groupId))
+                .build();
+    }
+
+    private static ConnectorSession defaultSession(KafkaConfig config)
+    {
+        return TestingConnectorSession.builder()
+                .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties())
                 .build();
     }
 

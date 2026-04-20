@@ -55,9 +55,12 @@ public class TestKafkaCommittedReadMode
 
     private TestingKafka testingKafka;
     private String defaultModeTopic;
+    private String defaultModePartitionedTopic;
     private String resumeTopic;
+    private String multiPartitionCommittedTopic;
     private String missingGroupTopic;
     private String missingOffsetTopic;
+    private String offsetsFunctionTopic;
     private String earlyCloseTopic;
     private String latestTopic;
     private String createTimeTopic;
@@ -77,9 +80,12 @@ public class TestKafkaCommittedReadMode
         testingKafka.start();
 
         defaultModeTopic = newTopicName("default_mode");
+        defaultModePartitionedTopic = newTopicName("default_mode_partitioned");
         resumeTopic = newTopicName("resume");
+        multiPartitionCommittedTopic = newTopicName("multi_partition_resume");
         missingGroupTopic = newTopicName("missing_group");
         missingOffsetTopic = newTopicName("missing_offset");
+        offsetsFunctionTopic = newTopicName("offsets_function");
         earlyCloseTopic = newTopicName("early_close");
         latestTopic = newTopicName("latest");
         createTimeTopic = newTopicName("create_time");
@@ -94,9 +100,12 @@ public class TestKafkaCommittedReadMode
         QueryRunner queryRunner = KafkaQueryRunner.builder(testingKafka)
                 .setExtraTopicDescription(ImmutableMap.<SchemaTableName, KafkaTopicDescription>builder()
                         .put(createEmptyTopicDescription(defaultModeTopic, new SchemaTableName("default", defaultModeTopic)))
+                        .put(createEmptyTopicDescription(defaultModePartitionedTopic, new SchemaTableName("default", defaultModePartitionedTopic)))
                         .put(createEmptyTopicDescription(resumeTopic, new SchemaTableName("default", resumeTopic)))
+                        .put(createEmptyTopicDescription(multiPartitionCommittedTopic, new SchemaTableName("default", multiPartitionCommittedTopic)))
                         .put(createEmptyTopicDescription(missingGroupTopic, new SchemaTableName("default", missingGroupTopic)))
                         .put(createEmptyTopicDescription(missingOffsetTopic, new SchemaTableName("default", missingOffsetTopic)))
+                        .put(createEmptyTopicDescription(offsetsFunctionTopic, new SchemaTableName("default", offsetsFunctionTopic)))
                         .put(createEmptyTopicDescription(earlyCloseTopic, new SchemaTableName("default", earlyCloseTopic)))
                         .put(createEmptyTopicDescription(latestTopic, new SchemaTableName("default", latestTopic)))
                         .put(createEmptyTopicDescription(createTimeTopic, new SchemaTableName("default", createTimeTopic)))
@@ -127,9 +136,12 @@ public class TestKafkaCommittedReadMode
                 "kafka.committed-read-missing-offset-policy", "LATEST"));
 
         testingKafka.createTopicWithConfig(1, 1, defaultModeTopic, false);
+        testingKafka.createTopicWithConfig(2, 1, defaultModePartitionedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, resumeTopic, false);
+        testingKafka.createTopicWithConfig(2, 1, multiPartitionCommittedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, missingGroupTopic, false);
         testingKafka.createTopicWithConfig(1, 1, missingOffsetTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, offsetsFunctionTopic, false);
         testingKafka.createTopicWithConfig(1, 1, earlyCloseTopic, false);
         testingKafka.createTopicWithConfig(1, 1, latestTopic, false);
         testingKafka.createTopicWithConfig(1, 1, createTimeTopic, false);
@@ -150,6 +162,23 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(format("SELECT count(*) FROM default.%s", defaultModeTopic)).getOnlyValue()).isEqualTo(20L);
         assertThat(getCommittedOffset(LEGACY_GROUP_ID, defaultModeTopic)).isEmpty();
+    }
+
+    @Test
+    public void testDefaultModeReadBehaviorIsUnaffected()
+    {
+        sendMessages(defaultModePartitionedTopic, 6);
+
+        assertQuery(
+                format("SELECT _partition_id, _partition_offset FROM default.%s ORDER BY 1, 2", defaultModePartitionedTopic),
+                "VALUES " +
+                        "(CAST(0 AS BIGINT), CAST(0 AS BIGINT)), " +
+                        "(CAST(0 AS BIGINT), CAST(1 AS BIGINT)), " +
+                        "(CAST(0 AS BIGINT), CAST(2 AS BIGINT)), " +
+                        "(CAST(1 AS BIGINT), CAST(0 AS BIGINT)), " +
+                        "(CAST(1 AS BIGINT), CAST(1 AS BIGINT)), " +
+                        "(CAST(1 AS BIGINT), CAST(2 AS BIGINT))");
+        assertThat(getCommittedOffsets(LEGACY_GROUP_ID, defaultModePartitionedTopic)).isEmpty();
     }
 
     @Test
@@ -189,6 +218,31 @@ public class TestKafkaCommittedReadMode
     }
 
     @Test
+    public void testCommittedReadUsesDifferentCommittedOffsetsPerPartition()
+            throws Exception
+    {
+        sendMessages(multiPartitionCommittedTopic, 8);
+
+        String groupId = "group_multi_partition_" + UUID.randomUUID().toString().replace("-", "");
+        setCommittedOffset(groupId, new TopicPartition(multiPartitionCommittedTopic, 0), 1L);
+        setCommittedOffset(groupId, new TopicPartition(multiPartitionCommittedTopic, 1), 3L);
+
+        Session session = committedReadSession(EARLIEST_CATALOG, groupId);
+
+        assertQuery(
+                session,
+                format("SELECT _partition_id, _partition_offset FROM default.%s ORDER BY 1, 2", multiPartitionCommittedTopic),
+                "VALUES " +
+                        "(CAST(0 AS BIGINT), CAST(1 AS BIGINT)), " +
+                        "(CAST(0 AS BIGINT), CAST(2 AS BIGINT)), " +
+                        "(CAST(0 AS BIGINT), CAST(3 AS BIGINT)), " +
+                        "(CAST(1 AS BIGINT), CAST(3 AS BIGINT))");
+        assertThat(getCommittedOffsets(groupId, multiPartitionCommittedTopic))
+                .containsEntry(0, 4L)
+                .containsEntry(1, 4L);
+    }
+
+    @Test
     public void testLatestPolicyCreatesCheckpointWithoutReadingHistoricalRows()
     {
         sendMessages(latestTopic, 12);
@@ -198,6 +252,27 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", latestTopic)).getOnlyValue()).isEqualTo(0L);
         assertThat(getCommittedOffset(groupId, latestTopic)).hasValue(getPartitionEndOffset(latestTopic));
+    }
+
+    @Test
+    public void testOffsetsTableFunctionDoesNotAffectCommittedReadConsumerGroup()
+    {
+        sendMessages(offsetsFunctionTopic, 5);
+
+        String groupId = "group_offsets_function_" + UUID.randomUUID().toString().replace("-", "");
+        Session session = committedReadSession(EARLIEST_CATALOG, groupId);
+
+        assertQuery(
+                session,
+                format(
+                        "SELECT partition_id, log_start_offset, log_end_offset, last_readable_offset " +
+                                "FROM TABLE(system.offsets(schema_name => 'default', table_name => '%s'))",
+                        offsetsFunctionTopic),
+                "VALUES (CAST(0 AS BIGINT), CAST(0 AS BIGINT), CAST(5 AS BIGINT), CAST(4 AS BIGINT))");
+        assertThat(getCommittedOffsets(groupId, offsetsFunctionTopic)).isEmpty();
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", offsetsFunctionTopic)).getOnlyValue()).isEqualTo(5L);
+        assertThat(getCommittedOffsets(groupId, offsetsFunctionTopic)).containsEntry(0, 5L);
     }
 
     @Test
@@ -391,13 +466,20 @@ public class TestKafkaCommittedReadMode
 
     private Optional<Long> getCommittedOffset(String groupId, String topicName)
     {
+        return Optional.ofNullable(getCommittedOffsets(groupId, topicName).get(0));
+    }
+
+    private Map<Integer, Long> getCommittedOffsets(String groupId, String topicName)
+    {
         try (Admin admin = Admin.create(Map.of(BOOTSTRAP_SERVERS_CONFIG, testingKafka.getConnectString()))) {
-            TopicPartition topicPartition = new TopicPartition(topicName, 0);
-            OffsetAndMetadata metadata = admin.listConsumerGroupOffsets(groupId)
+            return admin.listConsumerGroupOffsets(groupId)
                     .partitionsToOffsetAndMetadata()
                     .get()
-                    .get(topicPartition);
-            return Optional.ofNullable(metadata).map(OffsetAndMetadata::offset);
+                    .entrySet().stream()
+                    .filter(entry -> entry.getKey().topic().equals(topicName))
+                    .collect(java.util.stream.Collectors.toMap(
+                            entry -> entry.getKey().partition(),
+                            entry -> entry.getValue().offset()));
         }
         catch (Exception e) {
             throw new RuntimeException(e);
