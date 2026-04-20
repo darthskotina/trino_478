@@ -34,11 +34,11 @@ import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
-import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.connector.TableFunctionApplicationResult;
+import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.ComputedStatistics;
-import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 
 import java.util.Collection;
 import java.util.HashMap;

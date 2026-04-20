@@ -30,7 +30,6 @@ import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.function.table.AbstractConnectorTableFunction;
 import io.trino.spi.function.table.Argument;
 import io.trino.spi.function.table.ConnectorTableFunction;
-import io.trino.spi.function.table.Descriptor;
 import io.trino.spi.function.table.ReturnTypeSpecification.DescribedTable;
 import io.trino.spi.function.table.ScalarArgument;
 import io.trino.spi.function.table.ScalarArgumentSpecification;
