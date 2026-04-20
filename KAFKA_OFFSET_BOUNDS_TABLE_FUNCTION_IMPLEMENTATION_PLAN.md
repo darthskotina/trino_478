@@ -61,11 +61,11 @@ Relevant code paths today:
 The Kafka plugin does not currently expose connector table functions, so the
 main implementation step is adding that SQL surface to the connector.
 
-## Proposed User-Facing Contract
+## Final User-Facing Contract
 
 ### Function Name
 
-Recommended:
+Chosen contract:
 
 - schema: `system`
 - function: `offsets`
@@ -87,7 +87,7 @@ Optional argument:
 
 - `partition BIGINT`
 
-Recommended semantics:
+Chosen semantics:
 
 - if `partition` is omitted, return one row per partition for the topic
 - if `partition` is provided, return exactly one row for that partition
@@ -95,7 +95,7 @@ Recommended semantics:
 
 ### Output Columns
 
-Recommended output schema:
+Chosen output schema:
 
 - `partition_id BIGINT`
 - `log_start_offset BIGINT`
@@ -183,7 +183,7 @@ This avoids an API shape where:
 The optional parameter therefore improves both usability and operational
 behavior for high-partition-count topics.
 
-## Recommended Architecture
+## Final Architecture
 
 ## 1. Add A Kafka Connector Table Function
 
@@ -204,31 +204,27 @@ This is the largest implementation slice of the feature.
 
 Do not overload existing Kafka table scans or committed-read handles.
 
-Recommended approach:
+Chosen approach:
 
 - define a dedicated handle representing an offset-bounds function invocation
 - include:
   - topic name
   - optional partition id
 - keep this logically separate from the ordinary `KafkaTableHandle` used for
-  message scans if that separation makes execution clearer
+  message scans
 
-Alternative:
+Reason:
 
-- reuse `KafkaTableHandle` if it keeps execution simple and avoids excessive
-  new types
-
-Decision guidance:
-
-- prefer whichever option keeps function execution isolated from message-scan
-  semantics and easiest to test
+- function execution is metadata-only and should stay isolated from message
+  scan semantics
+- a dedicated handle keeps planning and testing simpler
 
 ## 3. Factor Out Broker Offset Lookup
 
 The connector already resolves topic partitions and begin/end offsets in
 `KafkaSplitManager`.
 
-Recommended refactor:
+Chosen refactor:
 
 - extract a small connector-local service or helper responsible for:
   - resolving available partitions for a topic
@@ -242,7 +238,7 @@ Why this is worthwhile:
 - reduces duplicate Kafka client code
 - makes unit and integration testing easier
 
-Suggested helper responsibilities:
+Helper responsibilities:
 
 - input:
   - `ConnectorSession`
@@ -266,8 +262,11 @@ Target behavior:
 - no message polling
 - no decoder involvement
 
-The implementation detail may vary depending on the preferred Trino table
-function execution path, but the plan should preserve this invariant.
+The implementation may use whichever Trino table-function execution path fits
+the Kafka connector best, but this invariant is fixed:
+
+- the function returns broker metadata rows only
+- it does not reuse message-polling execution paths
 
 ## Validation Rules
 
@@ -279,7 +278,7 @@ Required validations:
   - it must be non-negative
   - it must exist in the topic's current partition set
 
-Recommended failure messages:
+Failure handling rules:
 
 - clear distinction between:
   - unknown topic
@@ -323,7 +322,7 @@ Reason:
 - it would encourage misinterpretation of topic offsets as globally ordered
 - SQL aggregation already gives the derived view when needed
 
-## Implementation Steps
+## Delivery Plan
 
 ## Step 1. Define The SQL Contract
 
@@ -335,7 +334,7 @@ Finalize:
 - output column names and meanings
 - failure cases
 
-This should be considered locked before code starts so tests and docs align.
+These choices are locked by this plan so tests and docs align from the start.
 
 ## Step 2. Wire Table Function Support Into `KafkaConnector`
 
@@ -399,6 +398,35 @@ Required outcome:
 - semantic coverage for offset bounds
 - validation coverage
 - user-facing examples in docs
+
+## Implementation Notes
+
+### Ordering
+
+Return rows ordered by `partition_id` ascending.
+
+Reason:
+
+- stable output makes tests deterministic
+- users inspecting the function output get predictable ordering
+
+### Type Choice For `partition`
+
+The optional `partition` argument remains a single `BIGINT`.
+
+This is a deliberate v1 constraint:
+
+- it covers the main optimization case
+- it avoids complicating validation and analysis with arrays or sets
+- it leaves room for a future extension without changing existing semantics
+
+### Topic Validation Source
+
+Topic existence and partition validation should be based on the live Kafka
+metadata returned for the topic at execution time.
+
+This avoids creating a separate connector-side registry for topic metadata and
+keeps behavior aligned with the broker snapshot used for the offset lookup.
 
 ## Test Plan
 
@@ -472,15 +500,21 @@ Important nuance:
 - they do not scale with message volume
 - `partition => x` is the right optimization for large-partition-count topics
 
-## Open Decisions
+## Locked Decisions
 
-Recommended decisions unless a contrary requirement appears:
+This plan fixes the following decisions:
 
+- use a connector table function, not hidden columns or a system table
 - keep the function in schema `system`
-- name it `offsets`
-- keep `partition` as a single optional `BIGINT`, not an array
+- name the function `offsets`
+- require `topic VARCHAR`
+- support optional `partition BIGINT`
+- narrow Kafka lookup to the requested partition set when `partition` is
+  provided
+- return one row per partition, ordered by `partition_id`
 - expose broker bounds only in v1
-- treat topic-level summary as derived SQL, not as a separate function mode
+- keep topic-level summary as derived SQL, not as a separate function mode
+- use a dedicated offset-bounds handle rather than reusing `KafkaTableHandle`
 
 ## Acceptance Criteria
 
@@ -497,3 +531,13 @@ The feature is complete when:
   narrowing behavior
 - documentation includes example queries and explains that the function returns
   metadata snapshots, not topic rows
+
+## Explicitly Deferred Follow-Ups
+
+The following are intentionally deferred beyond this plan:
+
+- exposing consumer-group committed offsets alongside broker bounds
+- accepting multiple partitions in one function call
+- returning a separate topic-summary mode from the function itself
+- adding timestamp-based metadata lookup variants
+- introducing a Kafka system table in parallel with the function
