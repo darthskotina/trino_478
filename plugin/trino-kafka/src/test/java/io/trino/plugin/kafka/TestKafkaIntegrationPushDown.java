@@ -99,10 +99,11 @@ public class TestKafkaIntegrationPushDown
     public void testPartitionPushDown()
     {
         createMessages(topicNamePartition);
-        String sql = format("SELECT count(*) FROM default.%s WHERE _partition_id = 1 AND _partition_offset >= 0", topicNamePartition);
+        String sql = format("SELECT count(*) FROM default.%s WHERE _partition_id = 1", topicNamePartition);
+        Session session = readScopeOverrideSession();
 
         assertEventually(() -> {
-            MaterializedResultWithPlan queryResult = getDistributedQueryRunner().executeWithPlan(getSession(), sql);
+            MaterializedResultWithPlan queryResult = getDistributedQueryRunner().executeWithPlan(session, sql);
             assertThat(getQueryInfo(getDistributedQueryRunner(), queryResult).getQueryStats().getProcessedInputPositions()).isEqualTo(MESSAGE_NUM / 2);
         });
     }
@@ -164,7 +165,7 @@ public class TestKafkaIntegrationPushDown
     {
         assertQueryFails(
                 format("SELECT count(*) FROM default.%s", topicNameScopedReadOffset),
-                ".*require scope predicates.*");
+                ".*explicit finite predicate.*");
     }
 
     @Test
@@ -198,7 +199,7 @@ public class TestKafkaIntegrationPushDown
                 format(
                         "SELECT count(*) FROM default.%s WHERE _partition_id = 0 AND _timestamp < TIMESTAMP '2100-01-01 00:00:00.000'",
                         topicNameScopedReadCreateTime),
-                ".*require scope predicates.*");
+                ".*explicit finite predicate.*");
     }
 
     @Test

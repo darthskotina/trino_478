@@ -47,151 +47,167 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestKafkaScopedReadSplitManager
 {
+    private static final String VALIDATION_ONLY_TOPIC = "scoped_read_validation_only";
+
     @Test
     public void testRejectsUnconstrainedNormalModeScan()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "unconstrained");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaSplitManager splitManager = splitManager(config);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(splitManager, defaultSession(config), tableHandle(topicName, TupleDomain.all())))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(config, internalFieldManager, TupleDomain.all());
     }
 
     @Test
     public void testRejectsPartitionOnlyScope()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "partition_only");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(splitManager, defaultSession(config), tableHandle(topicName, partitionConstraint(internalFieldManager, io.trino.spi.predicate.Range.equal(BIGINT, 1L)))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(config, internalFieldManager, partitionConstraint(internalFieldManager, io.trino.spi.predicate.Range.equal(BIGINT, 1L)));
     }
 
     @Test
     public void testRejectsOffsetOnlyScope()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "offset_only");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(splitManager, defaultSession(config), tableHandle(topicName, partitionOffsetConstraint(internalFieldManager, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L)))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(config, internalFieldManager, partitionOffsetConstraint(internalFieldManager, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L)));
     }
 
     @Test
     public void testRejectsTimestampOnlyScope()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "timestamp_only");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(splitManager, defaultSession(config), tableHandle(topicName, timestampConstraint(internalFieldManager, io.trino.spi.predicate.Range.greaterThanOrEqual(TIMESTAMP_MILLIS, 1_000_000L)))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(config, internalFieldManager, timestampConstraint(internalFieldManager, io.trino.spi.predicate.Range.greaterThanOrEqual(TIMESTAMP_MILLIS, 1_000_000L)));
     }
 
     @Test
     public void testRejectsPartitionAndUpperBoundOffsetOnly()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "offset_upper_only");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(
-                    splitManager,
-                    defaultSession(config),
-                    tableHandle(topicName, constraint(
-                            internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.lessThan(BIGINT, 5L))),
-                            Optional.empty()))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                        Optional.of(domain(io.trino.spi.predicate.Range.lessThan(BIGINT, 5L))),
+                        Optional.empty()));
     }
 
     @Test
     public void testRejectsPartitionAndUpperBoundTimestampOnly()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "timestamp_upper_only");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(
-                    splitManager,
-                    defaultSession(config),
-                    tableHandle(topicName, constraint(
-                            internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
-                            Optional.empty(),
-                            Optional.of(domain(TIMESTAMP_MILLIS, io.trino.spi.predicate.Range.lessThan(TIMESTAMP_MILLIS, 1_000_000L)))))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                        Optional.empty(),
+                        Optional.of(domain(io.trino.spi.predicate.Range.lessThan(TIMESTAMP_MILLIS, 1_000_000L)))));
     }
 
     @Test
     public void testRejectsTrivialPartitionPredicate()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "trivial_partition");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(
-                    splitManager,
-                    defaultSession(config),
-                    tableHandle(topicName, constraint(
-                            internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.greaterThan(BIGINT, -1L))),
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
-                            Optional.empty()))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(domain(io.trino.spi.predicate.Range.greaterThan(BIGINT, -1L))),
+                        Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
+                        Optional.empty()));
     }
 
     @Test
     public void testRejectsPartitionRangePredicate()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "partition_range");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
-            KafkaSplitManager splitManager = splitManager(config, internalFieldManager);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
 
-            assertThatThrownBy(() -> getSplits(
-                    splitManager,
-                    defaultSession(config),
-                    tableHandle(topicName, constraint(
-                            internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.range(BIGINT, 0L, true, 1L, true))),
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
-                            Optional.empty()))))
-                    .hasMessageContaining("require scope predicates");
-        }
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(domain(io.trino.spi.predicate.Range.range(BIGINT, 0L, true, 1L, true))),
+                        Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
+                        Optional.empty()));
+    }
+
+    @Test
+    public void testRejectsPartitionOffsetNotEqualPredicate()
+            throws Exception
+    {
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                        Optional.of(domain(
+                                io.trino.spi.predicate.Range.lessThan(BIGINT, 5L),
+                                io.trino.spi.predicate.Range.greaterThan(BIGINT, 5L))),
+                        Optional.empty()));
+    }
+
+    @Test
+    public void testRejectsTrivialOffsetLowerBoundAtZero()
+            throws Exception
+    {
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                        Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 0L))),
+                        Optional.empty()));
+    }
+
+    @Test
+    public void testRejectsPartitionIsNotNullPredicate()
+            throws Exception
+    {
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+
+        assertScopeRejectedWithoutBroker(
+                config,
+                internalFieldManager,
+                constraint(
+                        internalFieldManager,
+                        Optional.of(Domain.create(ValueSet.all(BIGINT), false)),
+                        Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 100L))),
+                        Optional.empty()));
     }
 
     @Test
@@ -209,8 +225,8 @@ public class TestKafkaScopedReadSplitManager
                     defaultSession(config),
                     tableHandle(topicName, constraint(
                             internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
+                            Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                            Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
                             Optional.empty()))))
                     .isNotEmpty();
         }
@@ -231,9 +247,9 @@ public class TestKafkaScopedReadSplitManager
                     defaultSession(config),
                     tableHandle(topicName, constraint(
                             internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                            Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
                             Optional.empty(),
-                            Optional.of(domain(TIMESTAMP_MILLIS, io.trino.spi.predicate.Range.greaterThanOrEqual(TIMESTAMP_MILLIS, 1_000_000L)))))))
+                            Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(TIMESTAMP_MILLIS, 1_000_000L)))))))
                     .isNotEmpty();
         }
     }
@@ -253,8 +269,8 @@ public class TestKafkaScopedReadSplitManager
                     defaultSession(config),
                     tableHandle(topicName, constraint(
                             internalFieldManager,
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.equal(BIGINT, 0L), io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
-                            Optional.of(domain(BIGINT, io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
+                            Optional.of(domain(io.trino.spi.predicate.Range.equal(BIGINT, 0L), io.trino.spi.predicate.Range.equal(BIGINT, 1L))),
+                            Optional.of(domain(io.trino.spi.predicate.Range.greaterThanOrEqual(BIGINT, 1L))),
                             Optional.empty()))))
                     .hasSize(2);
         }
@@ -293,13 +309,14 @@ public class TestKafkaScopedReadSplitManager
     public void testConstraintNoneReturnsNoSplits()
             throws Exception
     {
-        try (TestingKafka testingKafka = TestingKafka.create()) {
-            String topicName = createTopicWithMessages(testingKafka, "none_constraint");
-            KafkaConfig config = baseConfig(testingKafka);
-            KafkaSplitManager splitManager = splitManager(config);
+        KafkaConfig config = baseConfig();
+        KafkaInternalFieldManager internalFieldManager = new KafkaInternalFieldManager(TESTING_TYPE_MANAGER, config);
+        BrokerAccessTracker tracker = new BrokerAccessTracker();
+        KafkaSplitManager splitManager = noBrokerSplitManager(config, internalFieldManager, tracker);
 
-            assertThat(getSplits(splitManager, defaultSession(config), tableHandle(topicName, TupleDomain.none()))).isEmpty();
-        }
+        assertThat(getSplits(splitManager, defaultSession(config), tableHandle(VALIDATION_ONLY_TOPIC, TupleDomain.none()))).isEmpty();
+        assertThat(tracker.consumerFactoryUsed).isFalse();
+        assertThat(tracker.adminFactoryUsed).isFalse();
     }
 
     private static String createTopicWithMessages(TestingKafka testingKafka, String prefix)
@@ -312,11 +329,17 @@ public class TestKafkaScopedReadSplitManager
         return topicName;
     }
 
-    private static KafkaConfig baseConfig(TestingKafka testingKafka)
+    private static KafkaConfig baseConfig()
     {
         return new KafkaConfig()
-                .setNodes(java.util.Set.of(testingKafka.getConnectString()))
+                .setNodes(java.util.Set.of("localhost:9092"))
                 .setTableDescriptionSupplier("test");
+    }
+
+    private static KafkaConfig baseConfig(TestingKafka testingKafka)
+    {
+        return baseConfig()
+                .setNodes(java.util.Set.of(testingKafka.getConnectString()));
     }
 
     private static KafkaSplitManager splitManager(KafkaConfig config)
@@ -330,6 +353,30 @@ public class TestKafkaScopedReadSplitManager
     {
         DefaultKafkaConsumerFactory consumerFactory = new DefaultKafkaConsumerFactory(config);
         DefaultKafkaAdminFactory adminFactory = new DefaultKafkaAdminFactory(config);
+        return splitManager(config, internalFieldManager, consumerFactory, adminFactory);
+    }
+
+    private static KafkaSplitManager noBrokerSplitManager(KafkaConfig config, KafkaInternalFieldManager internalFieldManager, BrokerAccessTracker tracker)
+            throws Exception
+    {
+        KafkaConsumerFactory consumerFactory = session -> {
+            tracker.consumerFactoryUsed = true;
+            throw new AssertionError("Kafka consumer should not be configured for scoped-read rejection");
+        };
+        KafkaAdminFactory adminFactory = session -> {
+            tracker.adminFactoryUsed = true;
+            throw new AssertionError("Kafka admin should not be configured for scoped-read rejection");
+        };
+        return splitManager(config, internalFieldManager, consumerFactory, adminFactory);
+    }
+
+    private static KafkaSplitManager splitManager(
+            KafkaConfig config,
+            KafkaInternalFieldManager internalFieldManager,
+            KafkaConsumerFactory consumerFactory,
+            KafkaAdminFactory adminFactory)
+            throws Exception
+    {
         KafkaFilterManager filterManager = new KafkaFilterManager(consumerFactory, adminFactory, internalFieldManager);
         ContentSchemaProvider schemaProvider = new ContentSchemaProvider()
         {
@@ -405,17 +452,17 @@ public class TestKafkaScopedReadSplitManager
 
     private static TupleDomain<ColumnHandle> partitionConstraint(KafkaInternalFieldManager internalFieldManager, io.trino.spi.predicate.Range... ranges)
     {
-        return constraint(internalFieldManager, Optional.of(domain(BIGINT, ranges)), Optional.empty(), Optional.empty());
+        return constraint(internalFieldManager, Optional.of(domain(ranges)), Optional.empty(), Optional.empty());
     }
 
     private static TupleDomain<ColumnHandle> partitionOffsetConstraint(KafkaInternalFieldManager internalFieldManager, io.trino.spi.predicate.Range... ranges)
     {
-        return constraint(internalFieldManager, Optional.empty(), Optional.of(domain(BIGINT, ranges)), Optional.empty());
+        return constraint(internalFieldManager, Optional.empty(), Optional.of(domain(ranges)), Optional.empty());
     }
 
     private static TupleDomain<ColumnHandle> timestampConstraint(KafkaInternalFieldManager internalFieldManager, io.trino.spi.predicate.Range... ranges)
     {
-        return constraint(internalFieldManager, Optional.empty(), Optional.empty(), Optional.of(domain(TIMESTAMP_MILLIS, ranges)));
+        return constraint(internalFieldManager, Optional.empty(), Optional.empty(), Optional.of(domain(ranges)));
     }
 
     private static TupleDomain<ColumnHandle> constraint(
@@ -431,8 +478,26 @@ public class TestKafkaScopedReadSplitManager
         return TupleDomain.withColumnDomains(domains);
     }
 
-    private static Domain domain(io.trino.spi.type.Type type, io.trino.spi.predicate.Range... ranges)
+    private static Domain domain(io.trino.spi.predicate.Range... ranges)
     {
         return Domain.create(ValueSet.ofRanges(Arrays.asList(ranges)), false);
+    }
+
+    private static void assertScopeRejectedWithoutBroker(KafkaConfig config, KafkaInternalFieldManager internalFieldManager, TupleDomain<ColumnHandle> constraint)
+            throws Exception
+    {
+        BrokerAccessTracker tracker = new BrokerAccessTracker();
+        KafkaSplitManager splitManager = noBrokerSplitManager(config, internalFieldManager, tracker);
+
+        assertThatThrownBy(() -> getSplits(splitManager, defaultSession(config), tableHandle(VALIDATION_ONLY_TOPIC, constraint)))
+                .hasMessageContaining("explicit finite predicate");
+        assertThat(tracker.consumerFactoryUsed).isFalse();
+        assertThat(tracker.adminFactoryUsed).isFalse();
+    }
+
+    private static class BrokerAccessTracker
+    {
+        private boolean consumerFactoryUsed;
+        private boolean adminFactoryUsed;
     }
 }

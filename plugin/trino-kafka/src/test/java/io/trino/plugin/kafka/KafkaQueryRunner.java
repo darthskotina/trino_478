@@ -70,6 +70,8 @@ public final class KafkaQueryRunner
 
     public static Builder builder(TestingKafka testingKafka)
     {
+        // Most shared Kafka tests predate scoped-read enforcement and intentionally use
+        // broad read shapes, so keep the shared harness opted out by default.
         return new Builder(TPCH_SCHEMA, false)
                 .addConnectorProperties(Map.of(
                         "kafka.nodes", testingKafka.getConnectString(),
@@ -80,6 +82,7 @@ public final class KafkaQueryRunner
 
     public static Builder builderForConfluentSchemaRegistry(TestingKafka testingKafka)
     {
+        // See builder(...): schema-registry tests also rely on the historical broad-read default.
         return new Builder("default", true)
                 .addConnectorProperties(Map.of(
                         "kafka.nodes", testingKafka.getConnectString(),

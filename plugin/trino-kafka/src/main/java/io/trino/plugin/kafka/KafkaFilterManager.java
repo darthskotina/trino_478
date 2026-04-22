@@ -186,10 +186,10 @@ public class KafkaFilterManager
                 .map(KafkaFilterManager::hasExplicitFinitePartitionPredicate)
                 .orElse(false);
         boolean hasEffectiveLowerBound = getDomain(PARTITION_OFFSET_FIELD, domains)
-                .map(KafkaFilterManager::hasLowerBound)
+                .map(KafkaFilterManager::hasEffectiveLowerBound)
                 .orElse(false)
                 || getDomain(OFFSET_TIMESTAMP_FIELD, domains)
-                .map(KafkaFilterManager::hasLowerBound)
+                .map(KafkaFilterManager::hasEffectiveLowerBound)
                 .orElse(false);
 
         if (!hasExplicitPartitionScope || !hasEffectiveLowerBound) {
@@ -211,7 +211,7 @@ public class KafkaFilterManager
         return new TrinoException(
                 QUERY_REJECTED,
                 format(
-                        "Kafka reads in normal mode require scope predicates on '%s' and a lower bound on either '%s' or '%s' for topic '%s'. Set session property 'enforce_read_scope' = false to override.",
+                        "Kafka reads in normal mode require an explicit finite predicate on '%s' (for example '=' or 'IN (...)') and a non-trivial lower bound or bounded window on either '%s' or '%s' for topic '%s'. Set session property 'enforce_read_scope' = false to override.",
                         partitionField,
                         partitionOffsetField,
                         timestampField,
@@ -220,7 +220,7 @@ public class KafkaFilterManager
 
     private void validateCommittedReadOffsetPredicate(String topic, Domain domain, boolean allowCommittedReadOffsetRewind)
     {
-        if (hasLowerBound(domain) && !allowCommittedReadOffsetRewind) {
+        if (hasAnyLowerBound(domain) && !allowCommittedReadOffsetRewind) {
             throw new TrinoException(
                     KAFKA_SPLIT_ERROR,
                     format("Committed-read mode does not allow lower-bound predicates on '_partition_offset' for topic '%s'", topic));
@@ -234,7 +234,7 @@ public class KafkaFilterManager
 
     private void validateCommittedReadTimestampPredicate(ConnectorSession session, String topic, Domain domain)
     {
-        if (hasLowerBound(domain)) {
+        if (hasAnyLowerBound(domain)) {
             throw new TrinoException(
                     KAFKA_SPLIT_ERROR,
                     format("Committed-read mode does not allow lower-bound predicates on '_timestamp' for topic '%s'", topic));
@@ -398,7 +398,7 @@ public class KafkaFilterManager
         throw new IllegalArgumentException("Unsupported type: " + type);
     }
 
-    private static boolean hasLowerBound(Domain domain)
+    private static boolean hasAnyLowerBound(Domain domain)
     {
         if (domain.isSingleValue()) {
             return true;
@@ -409,6 +409,14 @@ public class KafkaFilterManager
                     .anyMatch(range -> range.getLowValue().isPresent());
         }
         return false;
+    }
+
+    private static boolean hasEffectiveLowerBound(Domain domain)
+    {
+        return filterRangeByDomain(domain)
+                .filter(range -> range.begin() != INVALID_KAFKA_RANGE_INDEX)
+                .filter(range -> range.begin() > 0 || range.end() != INVALID_KAFKA_RANGE_INDEX)
+                .isPresent();
     }
 
     private static boolean hasUpperBound(Domain domain)
