@@ -19,14 +19,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class ApiFunctions {
-    private static final ConcurrentHashMap<String, String> CACHE = new ConcurrentHashMap<>();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Description("Calls a REST API with optional auth, method, headers, body; returns response as string")
-    @ScalarFunction("call_api")
+    @ScalarFunction(value = "call_api", deterministic = false)
     @SqlType(StandardTypes.VARCHAR)
     public static Slice callApi(
             @SqlType(StandardTypes.VARCHAR) Slice apiUrl,
@@ -41,7 +39,7 @@ public class ApiFunctions {
     }
 
     @Description("Calls a REST API; if return_meta is true, returns JSON with status, headers, cookies, body; otherwise returns response body")
-    @ScalarFunction("call_api")
+    @ScalarFunction(value = "call_api", deterministic = false)
     @SqlType(StandardTypes.VARCHAR)
     public static Slice callApi(
             @SqlType(StandardTypes.VARCHAR) Slice apiUrl,
@@ -60,11 +58,6 @@ public class ApiFunctions {
         String httpMethod = method.toStringUtf8().toUpperCase();
         String headersRaw = headersJson.toStringUtf8();
         String bodyContent = requestBody.toStringUtf8();
-
-        String cacheKey = urlString + "|" + user + "|" + pass + "|" + auth + "|" + httpMethod + "|" + headersRaw + "|" + bodyContent + "|" + returnMeta;
-        if (CACHE.containsKey(cacheKey)) {
-            return Slices.utf8Slice(CACHE.get(cacheKey));
-        }
 
         try {
             Response response = executeRequest(
@@ -90,8 +83,6 @@ public class ApiFunctions {
                         ? response.body
                         : "HTTP_ERROR: " + response.status + " BODY: " + response.body;
             }
-            CACHE.put(cacheKey, result);
-
             return Slices.utf8Slice(result);
         } catch (Exception e) {
             return Slices.utf8Slice("ERROR: " + e.getMessage());
