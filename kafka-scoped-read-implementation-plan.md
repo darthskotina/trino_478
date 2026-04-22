@@ -42,23 +42,24 @@ For normal mode, a Kafka read is scoped only if both of the following are true:
 
 ### Effective partition predicate
 
-The `_partition_id` predicate must do one of the following:
+The `_partition_id` predicate must resolve to an explicit finite set of partitions.
 
-- resolve to an explicit finite set of partitions, such as `=` or `IN (...)`
-- or reduce the selected partitions below the full topic partition set
+Examples that count:
 
-This avoids treating trivial predicates as scope, such as:
+- `_partition_id = 1`
+- `_partition_id IN (1, 2, 3)`
+- any domain representation that is equivalent to a finite set of singleton partition values
+
+This naturally covers single-partition topics: `_partition_id = 0` still qualifies because equality is an explicit singleton partition set.
+
+Examples that do not count:
 
 - `_partition_id IS NOT NULL`
 - `_partition_id > -1`
+- `_partition_id BETWEEN 1 AND 3`
+- arbitrary open or closed ranges that are not representable as a finite set of singleton partitions
 
-Examples:
-
-- `_partition_id = 1` counts as partition scope
-- `_partition_id IN (1, 2, 3)` counts as partition scope
-- `_partition_id BETWEEN 1 AND 3` counts only if it actually reduces the selected partition set
-
-For single-partition topics, `_partition_id = 0` should still count as scoped, even though it selects all available partitions, because it is an explicit finite partition selection rather than a trivial all-range predicate.
+This is intentionally stricter than "any narrowing partition domain". The reason is implementation timing: the guard should run before Kafka metadata calls, so it must rely on structural inspection of the pushed-down domain rather than comparing against the live topic partition set.
 
 ### Effective lower bound
 
@@ -94,6 +95,7 @@ For `_timestamp`, the rule intentionally depends only on the lower bound because
 - `SELECT * FROM topic WHERE _partition_id = 1 AND _partition_offset < 100`
 - `SELECT * FROM topic WHERE _partition_id = 1 AND _timestamp < TIMESTAMP '2024-01-01 00:00:00.000'`
 - `SELECT * FROM topic WHERE _partition_id > -1 AND _partition_offset >= 100`
+- `SELECT * FROM topic WHERE _partition_id BETWEEN 1 AND 3 AND _partition_offset >= 100`
 
 ## Why This Is Viable
 
@@ -123,8 +125,6 @@ Recommended behavior:
 
 - catalog default comes from `KafkaConfig`
 - session property overrides the catalog default for the current session
-
-If the team prefers the original `allow_unscoped_reads` polarity, the semantics stay the same, but the plan should still include config backing for rollout control.
 
 ## Enforcement Point
 
@@ -172,22 +172,22 @@ Add a helper in:
 
 Recommended shape:
 
-- `validateNormalReadScope(ConnectorSession session, KafkaTableHandle tableHandle, List<PartitionInfo> partitionInfos)`
+- `validateNormalReadScope(ConnectorSession session, KafkaTableHandle tableHandle)`
 
 Recommended logic:
 
 - return immediately if committed-read mode is enabled
 - return immediately if `enforce_read_scope` is `false`
-- if `tableHandle.constraint().isNone()`, treat the read as empty and skip rejection
 - if `tableHandle.constraint().isAll()`, reject immediately
 - resolve effective internal field names through `KafkaInternalFieldManager`
 - read domains from `TupleDomain`
-- require a non-trivial partition scope
+- require partition scope in the form of an explicit finite set of singleton partition values
 - require an effective lower bound on `_partition_offset` or `_timestamp`
 
-The helper should reuse the same semantics already embedded in Kafka planning where possible:
+The helper should use structural inspection of `Domain`, not live partition metadata:
 
-- use `filterValuesByDomain` or equivalent logic to evaluate effective partition selection
+- do not rely on `filterValuesByDomain` and comparing sizes against topic partitions
+- instead, inspect the `_partition_id` domain directly and accept only single-value or all-singleton discrete sets
 - use lower-bound detection, not just domain presence, for `_partition_offset` and `_timestamp`
 
 For `_timestamp`, the helper should explicitly ignore upper-bound-only domains as qualifying scope, even if the domain exists in the handle.
@@ -199,7 +199,7 @@ Invoke the validation from `KafkaSplitManager#getSplits` before offset discovery
 Recommended order:
 
 1. inspect mode and enforcement property
-2. short-circuit empty reads if needed
+2. if `tableHandle.constraint().isNone()`, return an empty `FixedSplitSource` immediately
 3. validate scoped-read requirement for normal mode
 4. continue with offset discovery and split planning
 
@@ -252,19 +252,21 @@ Reject as unscoped when enforcement is enabled.
 
 ### `constraint.isNone()`
 
-Treat as an empty read rather than an unscoped read. The plan should not reject a query that provably scans nothing.
+Handle this in `KafkaSplitManager` by returning an empty `FixedSplitSource` before invoking the validator or `KafkaFilterManager`.
+
+This is mostly a defensive path. In normal flow the Kafka connector may rarely see `isNone()`, but spelling it out avoids ambiguity and prevents the later `verify(!constraint.isNone())` in `KafkaFilterManager` from becoming load-bearing.
 
 ### `_partition_id IN (...)`
 
-This should pass the partition-scope check. The existing partition filtering logic already handles discrete value sets cleanly.
+This should pass the partition-scope check.
+
+### `_partition_id BETWEEN ...`
+
+This should not pass the partition-scope check under the recommended design because the validator is intentionally limited to explicit finite partition sets before Kafka metadata calls.
 
 ### `_timestamp` upper bounds on CreateTime topics
 
 These must not satisfy the scope rule by themselves because the connector may keep scanning from log start unless upper-bound pushdown is enabled.
-
-### Single-partition topics
-
-Explicit singleton partition selection should still count as scope even if it selects every available partition in that topic.
 
 ## Test Plan
 
@@ -285,6 +287,7 @@ Recommended coverage:
 - rejects `_partition_id = 1 AND _partition_offset < 100`
 - rejects `_partition_id = 1 AND _timestamp < ...`
 - rejects trivial partition predicate such as `_partition_id > -1`
+- rejects `_partition_id BETWEEN 1 AND 3 AND _partition_offset >= 100`
 - accepts `_partition_id = 1 AND _partition_offset >= 100`
 - accepts `_partition_id = 1 AND _timestamp >= ...`
 - accepts `_partition_id IN (1, 2, 3) AND _partition_offset >= 100`
@@ -303,7 +306,7 @@ Recommended scenarios:
 - `SELECT count(*) FROM default.<topic> WHERE _partition_id = 1 AND _partition_offset > 2` succeeds
 - `SELECT count(*) FROM default.<topic> WHERE _partition_id = 1 AND _timestamp >= TIMESTAMP '...'` succeeds
 - `SELECT count(*) FROM default.<topic> WHERE _partition_id = 1 AND _timestamp < TIMESTAMP '...'` fails
-- unscoped query succeeds when `kafka.enforce_read_scope = false`
+- unscoped query succeeds after `SET SESSION kafka.enforce_read_scope = false`
 
 The integration tests should make clear that the guard is tied to actual scan planning, not just SQL syntax.
 
@@ -320,7 +323,7 @@ Low complexity aspects:
 Medium complexity aspects:
 
 - the validation must align with actual scan-narrowing semantics, not raw domain presence
-- partition-scope detection must distinguish explicit or narrowing predicates from trivial ones
+- partition-scope detection must distinguish explicit finite partition sets from broader range predicates
 - tests need to cover timestamp pushdown nuances explicitly
 
 ## Tradeoffs
@@ -355,7 +358,7 @@ The change is complete when all of the following are true:
 
 - normal-mode Kafka scans without scope predicates fail by default
 - upper-bound-only `_partition_offset` or `_timestamp` predicates do not satisfy the scope rule
-- trivial `_partition_id` predicates do not satisfy the scope rule
+- trivial or range-based `_partition_id` predicates do not satisfy the scope rule
 - explicit finite partition selection plus lower-bound offset or timestamp predicates succeed
 - `_partition_id IN (...)` plus a valid lower bound succeeds
 - committed-read mode remains unaffected
