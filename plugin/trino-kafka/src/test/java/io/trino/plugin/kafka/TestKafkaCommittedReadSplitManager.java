@@ -105,6 +105,31 @@ public class TestKafkaCommittedReadSplitManager
     }
 
     @Test
+    public void testDefaultModeIgnoresCommittedReadMaxRowsPerPartition()
+            throws Exception
+    {
+        try (TestingKafka testingKafka = TestingKafka.create()) {
+            testingKafka.start();
+            String topicName = topicName("default_mode_ignores_committed_read_cap");
+            testingKafka.createTopicWithConfig(1, 1, topicName, false);
+            testingKafka.sendMessages(LongStream.range(0, 5).mapToObj(id -> new ProducerRecord<>(topicName, id, id)));
+
+            KafkaConfig config = baseConfig(testingKafka)
+                    .setMessagesPerSplit(2)
+                    .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.EARLIEST);
+            KafkaSplitManager splitManager = splitManager(config);
+
+            List<KafkaSplit> splits = getSplits(splitManager, defaultSession(config, 1L), tableHandle(topicName, TupleDomain.all()));
+
+            assertThat(splits).hasSize(3);
+            assertThat(splits.get(0).getMessagesRange()).isEqualTo(new Range(0, 2));
+            assertThat(splits.get(1).getMessagesRange()).isEqualTo(new Range(2, 4));
+            assertThat(splits.get(2).getMessagesRange()).isEqualTo(new Range(4, 5));
+            assertThat(splits).allSatisfy(split -> assertThat(split.getCommittedReadSplitMetadata()).isEmpty());
+        }
+    }
+
+    @Test
     public void testCommittedReadUsesDifferentCommittedOffsetsPerPartition()
             throws Exception
     {
@@ -733,9 +758,18 @@ public class TestKafkaCommittedReadSplitManager
 
     private static ConnectorSession defaultSession(KafkaConfig config)
     {
-        return TestingConnectorSession.builder()
-                .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties())
-                .build();
+        return defaultSession(config, null);
+    }
+
+    private static ConnectorSession defaultSession(KafkaConfig config, Long maxRowsPerPartition)
+    {
+        TestingConnectorSession.Builder sessionBuilder = TestingConnectorSession.builder()
+                .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties());
+        if (maxRowsPerPartition != null) {
+            sessionBuilder.setPropertyValues(Map.of("committed_read_max_rows_per_partition", maxRowsPerPartition));
+        }
+
+        return sessionBuilder.build();
     }
 
     private static ConnectorSession committedReadRewindSession(KafkaConfig config, String groupId)
