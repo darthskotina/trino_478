@@ -28,6 +28,13 @@ Recommended type:
 
 - `BIGINT`-backed session property in Java (`long`)
 
+Rationale:
+
+- Kafka offsets are `long`
+- the cap is combined with an offset start position during split planning
+- using `long` avoids artificial narrowing and keeps overflow handling local to
+  one helper
+
 Validation:
 
 - value must be `>= 0`
@@ -72,6 +79,18 @@ Result:
 - repeated plain `SELECT *` drains each partition in batches
 - the committed offset after a fully consumed batch is always the next unread
   offset for that partition
+
+EARLIEST interaction:
+
+- for a new group under missing-offset policy `EARLIEST`, the resolved
+  committed base is the current `logStart`
+- the cap then applies normally from that resolved start
+- example:
+  - `logStart = 0`
+  - `filteredEnd = 500000`
+  - cap = `10000`
+  - planned range is `[0, 10000)`
+  - commit target is `10000`
 
 ### Rewind-Enabled Mode
 
@@ -156,6 +175,10 @@ currently uses:
 
 with no additional batch cap for data-carrying splits.
 
+Committed-read still must produce exactly one split per selected partition
+after this change. The new cap narrows that one split's range, but must not
+reintroduce `messages-per-split` sub-partitioning in committed-read mode.
+
 ## Required Code Changes
 
 ### 1. Add Session Property
@@ -188,6 +211,14 @@ Changes:
 - read the new session property once near other committed-read session settings
 - thread the cap into committed-read split planning
 
+Scoping rule:
+
+- read the session property unconditionally for simplicity
+- consume it only inside committed-read split planning
+- no extra default-mode guard is required beyond the existing
+  `committedReadMode` branch, because `planCommittedReadSplit(...)` is only
+  reached in committed-read mode
+
 Recommended method shape:
 
 - extend `planCommittedReadSplit(...)` to accept
@@ -203,8 +234,10 @@ Core rule:
 
 - compute `uncappedStart` and `uncappedEnd` exactly from the already agreed
   committed-read / rewind logic
-- only after `start` is chosen, cap the data-carrying end as:
-  - `cappedEnd = min(uncappedEnd, start + maxRowsPerPartition)` when cap > 0
+- only after `start` is chosen and only inside the `start < uncappedEnd`
+  data-split branch, cap the data-carrying end as:
+  - `cappedEnd = min(uncappedEnd, saturatedAdd(start, maxRowsPerPartition))`
+    when cap > 0
   - `cappedEnd = uncappedEnd` when cap == 0
 
 Important detail:
@@ -212,12 +245,21 @@ Important detail:
 - cap only data-carrying splits
 - do not alter the existing checkpoint-only `LATEST` initialization logic when
   there is no explicit rewind window and planning resolves to an empty range
+- evaluate the checkpoint-only branch against uncapped values
+- do not modify `end` before the `start < uncappedEnd` gate
 
 Reason:
 
 - checkpoint-only behavior is about persisting a resolved initial resume point
 - the new feature is about limiting data reads, not changing empty-range
   initialization semantics
+
+Invariant:
+
+- the cap is applied only when `start < uncappedEnd`
+- therefore a missing/invalid-offset `LATEST` initialization still resolves to
+  the same checkpoint-only split as today, because `start == uncappedEnd`
+  before capping and the cap is never consulted for that branch
 
 ### 4. Preserve Existing Rewind Start Semantics
 
@@ -271,6 +313,8 @@ Requirement:
 
 - `messages-per-split` remains the planning control for default mode
 - the new session property must not change default-mode split planning
+- `messages-per-split` remains irrelevant in committed-read mode, which still
+  plans exactly one split per selected partition
 
 ## Exact Planning Rules To Encode
 
@@ -285,12 +329,27 @@ Given:
 Plan:
 
 - `start = min(filteredEnd, resolvedCommittedBase)` under existing rules
-- `end = filteredEnd`
-- if `cap > 0` and `start < end`, replace `end` with `min(end, start + cap)`
+- `uncappedEnd = filteredEnd`
+- if `start < uncappedEnd` and `cap > 0`, set
+  `end = min(uncappedEnd, saturatedAdd(start, cap))`
+- otherwise `end = uncappedEnd`
 
 Commit:
 
 - `commitTarget = end`
+
+Upper-bound interaction:
+
+- the cap can only narrow the window
+- it never widens the window
+- a tighter explicit upper-bound predicate naturally takes precedence via
+  `min(uncappedEnd, ...)`
+
+EARLIEST interaction:
+
+- if missing-offset policy resolves the committed base from `EARLIEST`, that
+  resolved base is treated exactly like any other committed start
+- the cap is then applied from that resolved start
 
 ### Rewind-Enabled With Explicit Lower Bound
 
@@ -304,12 +363,20 @@ Given:
 Plan:
 
 - `start = filteredBegin`
-- `end = filteredEnd`
-- if `cap > 0` and `start < end`, replace `end` with `min(end, start + cap)`
+- `uncappedEnd = filteredEnd`
+- if `start < uncappedEnd` and `cap > 0`, set
+  `end = min(uncappedEnd, saturatedAdd(start, cap))`
+- otherwise `end = uncappedEnd`
 
 Commit:
 
 - `commitTarget = end`
+
+Upper-bound interaction:
+
+- the cap can only narrow the explicit rewind window
+- if the query's upper bound is tighter than `start + cap`, the upper bound
+  wins naturally
 
 ### Empty Windows
 
@@ -328,8 +395,10 @@ Use safe arithmetic when computing `start + cap`.
 
 Recommended approach:
 
-- use `Math.addExact(start, cap)` with fallback to `Long.MAX_VALUE`, or
-- compute a saturated sum helper
+- add a small `saturatedAdd(long left, long right)` helper
+- implement capped-end calculation as
+  `min(uncappedEnd, saturatedAdd(start, cap))`
+- `saturatedAdd` should return `Long.MAX_VALUE` on overflow rather than throw
 
 The implementation must not wrap negative on large offsets.
 
@@ -343,9 +412,15 @@ File:
 
 Add coverage for:
 
-- cap `0` preserves current committed-read planning
+- cap `0` preserves current committed-read planning by mirroring an existing
+  committed-read scenario and asserting identical range and metadata with the
+  property explicitly set to `0`
+- specifically, add a cap-`0` variant of an existing "one split per partition"
+  committed-read test rather than relying on a vague preservation assertion
 - normal committed-read with cap plans `[committedBase, committedBase + cap)`
   when enough unread rows exist
+- new group under missing-offset policy `EARLIEST` plus cap plans
+  `[logStart, logStart + cap)` when enough rows exist
 - normal committed-read with cap respects a tighter filtered upper bound
 - multi-partition committed-read applies the cap independently per partition
 - rewind-enabled planning with `_partition_offset >= x` and cap plans
@@ -373,6 +448,8 @@ Add coverage for:
 - early close of a capped split still suppresses commit
 - rewind-planned capped split commits the rebased end
 - equality rewind split with cap larger than one row still commits `x + 1`
+- commit failure on a fully consumed capped data split propagates the same
+  `TrinoException` path as any other committed-read data split
 
 ### Broker-Backed Integration Tests
 
@@ -382,11 +459,17 @@ File:
 
 Required scenarios:
 
-- new group, one partition, cap `10000`, topic has more than `10000` rows:
+- new group, one partition, catalog missing-offset policy `EARLIEST`, cap
+  `10000`, topic has more than `10000` rows:
   - first plain committed-read query returns `10000`
   - Kafka committed offset becomes `10000`
   - second plain committed-read query returns the next batch
   - repeated queries eventually drain the topic
+- new group, one partition, catalog missing-offset policy `LATEST`, cap
+  `10000`, topic already has rows:
+  - first plain committed-read query returns `0`
+  - Kafka committed offset becomes the broker end
+  - this verifies the cap does not affect checkpoint-only initialization
 - multi-partition topic with cap:
   - each partition advances by at most the cap
   - total rows may exceed the cap because the cap is per partition
@@ -422,8 +505,11 @@ Required updates:
 - explain per-partition batching semantics
 - state that the cap applies in committed-read mode only
 - state that `0` means unlimited
-- explain that the cap limits planned data windows, not SQL output rows after
-  arbitrary filtering
+- explain that the cap limits planned offset windows, not guaranteed returned
+  row counts
+- note that due to Kafka realities such as compaction, tombstones, or other
+  offset-to-row mismatches, the actual number of returned rows may be smaller
+  than the configured cap
 - explain that rewind plus cap may deliberately move the stored group offset
   backward only to the capped window end
 - explain that subsequent plain reads resume from that rebased offset
@@ -444,6 +530,9 @@ Required updates:
 - clarify the distinction between `kafka.messages-per-split` in default mode
   and `committed_read_max_rows_per_partition` in committed-read mode
 - carry over the multi-partition caveat and rewind semantics
+- clarify that committed-read batching still produces one split per selected
+  partition and that the property limits planned offset windows, not exact
+  output row counts
 
 ### Design / Plan Docs
 
@@ -457,6 +546,9 @@ Required updates:
   data split always runs to the broker snapshot end
 - add the new per-partition batch-limit contract
 - add the rewind-plus-cap rebase behavior
+- document the ordering invariant that capping happens only inside the normal
+  data-split branch and does not participate in checkpoint-only `LATEST`
+  initialization
 
 ## Suggested Implementation Order
 
