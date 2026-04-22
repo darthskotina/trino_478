@@ -74,6 +74,7 @@ public final class KafkaQueryRunner
                 .addConnectorProperties(Map.of(
                         "kafka.nodes", testingKafka.getConnectString(),
                         "kafka.messages-per-split", "1000",
+                        "kafka.enforce-read-scope", "false",
                         "kafka.table-description-supplier", TEST));
     }
 
@@ -83,6 +84,7 @@ public final class KafkaQueryRunner
                 .addConnectorProperties(Map.of(
                         "kafka.nodes", testingKafka.getConnectString(),
                         "kafka.messages-per-split", "1000",
+                        "kafka.enforce-read-scope", "false",
                         "kafka.table-description-supplier", "confluent",
                         "kafka.confluent-schema-registry-url", testingKafka.getSchemaRegistryConnectString(),
                         "kafka.protobuf-any-support-enabled", "true"));

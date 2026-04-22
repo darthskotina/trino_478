@@ -763,12 +763,15 @@ public class TestKafkaCommittedReadSplitManager
 
     private static ConnectorSession defaultSession(KafkaConfig config, Long maxRowsPerPartition)
     {
-        TestingConnectorSession.Builder sessionBuilder = TestingConnectorSession.builder()
-                .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties());
+        Map<String, Object> propertyValues = new HashMap<>();
+        propertyValues.put("enforce_read_scope", false);
         if (maxRowsPerPartition != null) {
-            sessionBuilder.setPropertyValues(Map.of("committed_read_max_rows_per_partition", maxRowsPerPartition));
+            propertyValues.put("committed_read_max_rows_per_partition", maxRowsPerPartition);
         }
 
+        TestingConnectorSession.Builder sessionBuilder = TestingConnectorSession.builder()
+                .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties())
+                .setPropertyValues(propertyValues);
         return sessionBuilder.build();
     }
 

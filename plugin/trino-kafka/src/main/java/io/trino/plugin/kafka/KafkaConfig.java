@@ -51,6 +51,7 @@ public class KafkaConfig
     private List<File> resourceConfigFiles = ImmutableList.of();
     private String internalFieldPrefix = "_";
     private String consumerGroupId = "bigdata-spark-streaming";
+    private boolean enforceReadScope = true;
     private boolean committedReadEnabled;
     private KafkaCommittedReadMissingOffsetPolicy committedReadMissingOffsetPolicy = KafkaCommittedReadMissingOffsetPolicy.ERROR;
 
@@ -197,6 +198,19 @@ public class KafkaConfig
     public KafkaConfig setConsumerGroupId(String consumerGroupId)
     {
         this.consumerGroupId = consumerGroupId;
+        return this;
+    }
+
+    public boolean isEnforceReadScope()
+    {
+        return enforceReadScope;
+    }
+
+    @Config("kafka.enforce-read-scope")
+    @ConfigDescription("Require scoped normal-mode Kafka reads by default")
+    public KafkaConfig setEnforceReadScope(boolean enforceReadScope)
+    {
+        this.enforceReadScope = enforceReadScope;
         return this;
     }
 

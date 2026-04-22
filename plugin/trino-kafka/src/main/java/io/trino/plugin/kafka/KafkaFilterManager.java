@@ -51,6 +51,7 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static io.trino.plugin.kafka.KafkaInternalFieldManager.InternalFieldId.OFFSET_TIMESTAMP_FIELD;
 import static io.trino.plugin.kafka.KafkaInternalFieldManager.InternalFieldId.PARTITION_ID_FIELD;
 import static io.trino.plugin.kafka.KafkaInternalFieldManager.InternalFieldId.PARTITION_OFFSET_FIELD;
+import static io.trino.spi.StandardErrorCode.QUERY_REJECTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static java.lang.Math.floorDiv;
@@ -161,10 +162,60 @@ public class KafkaFilterManager
         return new KafkaFilteringResult(partitionInfos, partitionBeginOffsets, partitionEndOffsets);
     }
 
+    public void validateNormalReadScope(ConnectorSession session, KafkaTableHandle tableHandle)
+    {
+        requireNonNull(session, "session is null");
+        requireNonNull(tableHandle, "tableHandle is null");
+
+        if (KafkaSessionProperties.isCommittedReadEnabled(session) || !KafkaSessionProperties.isEnforceReadScope(session)) {
+            return;
+        }
+
+        TupleDomain<ColumnHandle> constraint = tableHandle.constraint();
+        if (constraint.isAll()) {
+            throw unscopedReadException(tableHandle.topicName());
+        }
+
+        Map<String, Domain> domains = constraint.getDomains().orElseThrow()
+                .entrySet().stream()
+                .collect(toImmutableMap(
+                        entry -> ((KafkaColumnHandle) entry.getKey()).getName(),
+                        Map.Entry::getValue));
+
+        boolean hasExplicitPartitionScope = getDomain(PARTITION_ID_FIELD, domains)
+                .map(KafkaFilterManager::hasExplicitFinitePartitionPredicate)
+                .orElse(false);
+        boolean hasEffectiveLowerBound = getDomain(PARTITION_OFFSET_FIELD, domains)
+                .map(KafkaFilterManager::hasLowerBound)
+                .orElse(false)
+                || getDomain(OFFSET_TIMESTAMP_FIELD, domains)
+                .map(KafkaFilterManager::hasLowerBound)
+                .orElse(false);
+
+        if (!hasExplicitPartitionScope || !hasEffectiveLowerBound) {
+            throw unscopedReadException(tableHandle.topicName());
+        }
+    }
+
     private Optional<Domain> getDomain(InternalFieldId internalFieldId, Map<String, Domain> columnNameToDomain)
     {
         String columnName = kafkaInternalFieldManager.getFieldById(internalFieldId).getColumnName();
         return Optional.ofNullable(columnNameToDomain.get(columnName));
+    }
+
+    private TrinoException unscopedReadException(String topic)
+    {
+        String partitionField = kafkaInternalFieldManager.getFieldById(PARTITION_ID_FIELD).getColumnName();
+        String partitionOffsetField = kafkaInternalFieldManager.getFieldById(PARTITION_OFFSET_FIELD).getColumnName();
+        String timestampField = kafkaInternalFieldManager.getFieldById(OFFSET_TIMESTAMP_FIELD).getColumnName();
+        return new TrinoException(
+                QUERY_REJECTED,
+                format(
+                        "Kafka reads in normal mode require scope predicates on '%s' and a lower bound on either '%s' or '%s' for topic '%s'. Set session property 'enforce_read_scope' = false to override.",
+                        partitionField,
+                        partitionOffsetField,
+                        timestampField,
+                        topic));
     }
 
     private void validateCommittedReadOffsetPredicate(String topic, Domain domain, boolean allowCommittedReadOffsetRewind)
@@ -369,6 +420,19 @@ public class KafkaFilterManager
         if (valueSet instanceof SortedRangeSet sortedRangeSet) {
             return sortedRangeSet.getRanges().getOrderedRanges().stream()
                     .anyMatch(range -> range.getHighValue().isPresent());
+        }
+        return false;
+    }
+
+    private static boolean hasExplicitFinitePartitionPredicate(Domain domain)
+    {
+        if (domain.isSingleValue()) {
+            return true;
+        }
+        ValueSet valueSet = domain.getValues();
+        if (valueSet instanceof SortedRangeSet sortedRangeSet) {
+            return sortedRangeSet.getRanges().getOrderedRanges().stream()
+                    .allMatch(io.trino.spi.predicate.Range::isSingleValue);
         }
         return false;
     }

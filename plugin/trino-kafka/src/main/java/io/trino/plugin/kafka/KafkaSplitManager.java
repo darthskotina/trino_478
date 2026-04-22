@@ -91,6 +91,10 @@ public class KafkaSplitManager
         long committedReadMaxRowsPerPartition = KafkaSessionProperties.getCommittedReadMaxRowsPerPartition(session);
         Optional<String> committedReadGroupId = committedReadMode ? Optional.of(KafkaSessionProperties.getRequiredCommittedReadGroupId(session)) : Optional.empty();
 
+        if (kafkaTableHandle.constraint().isNone()) {
+            return new FixedSplitSource(ImmutableList.of());
+        }
+        kafkaFilterManager.validateNormalReadScope(session, kafkaTableHandle);
         committedReadGroupId.ifPresent(groupId -> committedReadRegistry.register(session.getQueryId(), groupId, kafkaTableHandle.topicName()));
 
         try {

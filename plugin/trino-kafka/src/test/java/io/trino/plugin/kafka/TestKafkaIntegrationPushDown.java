@@ -46,6 +46,7 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 public class TestKafkaIntegrationPushDown
         extends AbstractTestQueryFramework
 {
+    private static final String DEFAULT_CATALOG = "kafka";
     private static final int MESSAGE_NUM = 1000;
     private static final int TIMESTAMP_TEST_COUNT = 6;
     private static final int TIMESTAMP_TEST_START_INDEX = 2;
@@ -56,6 +57,8 @@ public class TestKafkaIntegrationPushDown
     private String topicNameOffset;
     private String topicNameCreateTime;
     private String topicNameLogAppend;
+    private String topicNameScopedReadOffset;
+    private String topicNameScopedReadCreateTime;
 
     @Override
     protected QueryRunner createQueryRunner()
@@ -67,6 +70,8 @@ public class TestKafkaIntegrationPushDown
         topicNameOffset = "test_push_down_offset_" + UUID.randomUUID().toString().replaceAll("-", "_");
         topicNameCreateTime = "test_push_down_create_time_" + UUID.randomUUID().toString().replaceAll("-", "_");
         topicNameLogAppend = "test_push_down_log_append_" + UUID.randomUUID().toString().replaceAll("-", "_");
+        topicNameScopedReadOffset = "test_scoped_read_offset_" + UUID.randomUUID().toString().replaceAll("-", "_");
+        topicNameScopedReadCreateTime = "test_scoped_read_create_time_" + UUID.randomUUID().toString().replaceAll("-", "_");
 
         QueryRunner queryRunner = KafkaQueryRunner.builder(testingKafka)
                 .setExtraTopicDescription(ImmutableMap.<SchemaTableName, KafkaTopicDescription>builder()
@@ -74,13 +79,19 @@ public class TestKafkaIntegrationPushDown
                         .put(createEmptyTopicDescription(topicNameOffset, new SchemaTableName("default", topicNameOffset)))
                         .put(createEmptyTopicDescription(topicNameCreateTime, new SchemaTableName("default", topicNameCreateTime)))
                         .put(createEmptyTopicDescription(topicNameLogAppend, new SchemaTableName("default", topicNameLogAppend)))
+                        .put(createEmptyTopicDescription(topicNameScopedReadOffset, new SchemaTableName("default", topicNameScopedReadOffset)))
+                        .put(createEmptyTopicDescription(topicNameScopedReadCreateTime, new SchemaTableName("default", topicNameScopedReadCreateTime)))
                         .buildOrThrow())
-                .addConnectorProperties(ImmutableMap.of("kafka.messages-per-split", "100"))
+                .addConnectorProperties(ImmutableMap.of(
+                        "kafka.messages-per-split", "100",
+                        "kafka.enforce-read-scope", "true"))
                 .build();
         testingKafka.createTopicWithConfig(2, 1, topicNamePartition, false);
         testingKafka.createTopicWithConfig(2, 1, topicNameOffset, false);
         testingKafka.createTopicWithConfig(1, 1, topicNameCreateTime, false);
         testingKafka.createTopicWithConfig(1, 1, topicNameLogAppend, true);
+        testingKafka.createTopicWithConfig(2, 1, topicNameScopedReadOffset, false);
+        testingKafka.createTopicWithConfig(1, 1, topicNameScopedReadCreateTime, false);
         return queryRunner;
     }
 
@@ -88,7 +99,7 @@ public class TestKafkaIntegrationPushDown
     public void testPartitionPushDown()
     {
         createMessages(topicNamePartition);
-        String sql = format("SELECT count(*) FROM default.%s WHERE _partition_id=1", topicNamePartition);
+        String sql = format("SELECT count(*) FROM default.%s WHERE _partition_id = 1 AND _partition_offset >= 0", topicNamePartition);
 
         assertEventually(() -> {
             MaterializedResultWithPlan queryResult = getDistributedQueryRunner().executeWithPlan(getSession(), sql);
@@ -100,9 +111,10 @@ public class TestKafkaIntegrationPushDown
     public void testOffsetPushDown()
     {
         createMessages(topicNameOffset);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _partition_offset between 2 and 10", topicNameOffset), 18);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _partition_offset > 2 and _partition_offset < 10", topicNameOffset), 14);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _partition_offset = 3", topicNameOffset), 2);
+        Session session = readScopeOverrideSession();
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _partition_offset between 2 and 10", topicNameOffset), 18, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _partition_offset > 2 and _partition_offset < 10", topicNameOffset), 14, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _partition_offset = 3", topicNameOffset), 2, session);
     }
 
     @Test
@@ -110,16 +122,17 @@ public class TestKafkaIntegrationPushDown
             throws Exception
     {
         RecordMessage recordMessage = createTimestampTestMessages(topicNameCreateTime);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp < timestamp '%s'", topicNameCreateTime, recordMessage.getEndTime()), 1000);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp <= timestamp '%s'", topicNameCreateTime, recordMessage.getEndTime()), 1000);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp > timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime()), 997);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime()), 998);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp between timestamp '%s' and timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime(), recordMessage.getEndTime()), 998);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s' and _timestamp < timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime(), recordMessage.getEndTime()), 998);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp = timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime()), 998);
+        Session session = readScopeOverrideSession();
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp < timestamp '%s'", topicNameCreateTime, recordMessage.getEndTime()), 1000, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp <= timestamp '%s'", topicNameCreateTime, recordMessage.getEndTime()), 1000, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp > timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime()), 997, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime()), 998, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp between timestamp '%s' and timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime(), recordMessage.getEndTime()), 998, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s' and _timestamp < timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime(), recordMessage.getEndTime()), 998, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp = timestamp '%s'", topicNameCreateTime, recordMessage.getStartTime()), 998, session);
 
         // timestamp_upper_bound_force_push_down_enabled set as true.
-        Session sessionWithUpperBoundPushDownEnabled = Session.builder(getSession())
+        Session sessionWithUpperBoundPushDownEnabled = Session.builder(readScopeOverrideSession())
                 .setSystemProperty("kafka.timestamp_upper_bound_force_push_down_enabled", "true")
                 .build();
         assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp < timestamp '%s'", topicNameCreateTime, recordMessage.getEndTime()), 4, sessionWithUpperBoundPushDownEnabled);
@@ -136,13 +149,65 @@ public class TestKafkaIntegrationPushDown
             throws Exception
     {
         RecordMessage recordMessage = createTimestampTestMessages(topicNameLogAppend);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp < timestamp '%s'", topicNameLogAppend, recordMessage.getEndTime()), 4);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp <= timestamp '%s'", topicNameLogAppend, recordMessage.getEndTime()), 4);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp > timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime()), 997);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime()), 998);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp between timestamp '%s' and timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime(), recordMessage.getEndTime()), 2);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s' and _timestamp < timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime(), recordMessage.getEndTime()), 2);
-        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp = timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime()), 0);
+        Session session = readScopeOverrideSession();
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp < timestamp '%s'", topicNameLogAppend, recordMessage.getEndTime()), 4, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp <= timestamp '%s'", topicNameLogAppend, recordMessage.getEndTime()), 4, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp > timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime()), 997, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime()), 998, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp between timestamp '%s' and timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime(), recordMessage.getEndTime()), 2, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp >= timestamp '%s' and _timestamp < timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime(), recordMessage.getEndTime()), 2, session);
+        assertProcessedInputPositions(format("SELECT count(*) FROM default.%s WHERE _timestamp = timestamp '%s'", topicNameLogAppend, recordMessage.getStartTime()), 0, session);
+    }
+
+    @Test
+    public void testUnscopedReadRejectedByDefault()
+    {
+        assertQueryFails(
+                format("SELECT count(*) FROM default.%s", topicNameScopedReadOffset),
+                ".*require scope predicates.*");
+    }
+
+    @Test
+    public void testScopedReadWithPartitionAndOffsetLowerBoundSucceeds()
+    {
+        createMessages(topicNameScopedReadOffset);
+
+        assertThat(computeActual(format(
+                "SELECT count(*) FROM default.%s WHERE _partition_id = 1 AND _partition_offset > 2",
+                topicNameScopedReadOffset)).getOnlyValue())
+                .isInstanceOf(Long.class);
+    }
+
+    @Test
+    public void testScopedReadWithPartitionAndTimestampLowerBoundSucceeds()
+            throws Exception
+    {
+        RecordMessage recordMessage = createTimestampTestMessages(topicNameScopedReadCreateTime);
+
+        assertThat(computeActual(format(
+                "SELECT count(*) FROM default.%s WHERE _partition_id = 0 AND _timestamp >= timestamp '%s'",
+                topicNameScopedReadCreateTime,
+                recordMessage.getStartTime())).getOnlyValue())
+                .isEqualTo(998L);
+    }
+
+    @Test
+    public void testTimestampUpperBoundOnlyDoesNotSatisfyScope()
+    {
+        assertQueryFails(
+                format(
+                        "SELECT count(*) FROM default.%s WHERE _partition_id = 0 AND _timestamp < TIMESTAMP '2100-01-01 00:00:00.000'",
+                        topicNameScopedReadCreateTime),
+                ".*require scope predicates.*");
+    }
+
+    @Test
+    public void testUnscopedReadSucceedsWhenScopeEnforcementDisabled()
+    {
+        createMessages(topicNameScopedReadOffset);
+
+        assertThat(computeActual(readScopeOverrideSession(), format("SELECT count(*) FROM default.%s", topicNameScopedReadOffset)).getOnlyValue())
+                .isInstanceOf(Long.class);
     }
 
     private void assertProcessedInputPositions(String sql, long expectedProcessedInputPositions)
@@ -162,6 +227,13 @@ public class TestKafkaIntegrationPushDown
     private static QueryInfo getQueryInfo(QueryRunner queryRunner, MaterializedResultWithPlan queryResult)
     {
         return queryRunner.getCoordinator().getQueryManager().getFullQueryInfo(queryResult.queryId());
+    }
+
+    private Session readScopeOverrideSession()
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(DEFAULT_CATALOG, "enforce_read_scope", "false")
+                .build();
     }
 
     private RecordMessage createTimestampTestMessages(String topicName)

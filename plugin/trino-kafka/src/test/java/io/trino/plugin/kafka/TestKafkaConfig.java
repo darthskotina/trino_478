@@ -45,6 +45,7 @@ public class TestKafkaConfig
                 .setResourceConfigFiles(List.of())
                 .setInternalFieldPrefix("_")
                 .setConsumerGroupId("bigdata-spark-streaming")
+                .setEnforceReadScope(true)
                 .setCommittedReadEnabled(false)
                 .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.ERROR));
     }
@@ -67,6 +68,7 @@ public class TestKafkaConfig
                 .put("kafka.config.resources", resource1.toString() + "," + resource2.toString())
                 .put("kafka.internal-column-prefix", "the_most_unexpected_prefix_")
                 .put("kafka.consumer-group-id", "legacy-read-group")
+                .put("kafka.enforce-read-scope", "false")
                 .put("kafka.committed-read-enabled", "true")
                 .put("kafka.committed-read-missing-offset-policy", "LATEST")
                 .buildOrThrow();
@@ -82,6 +84,7 @@ public class TestKafkaConfig
                 .setResourceConfigFiles(ImmutableList.of(resource1.toString(), resource2.toString()))
                 .setInternalFieldPrefix("the_most_unexpected_prefix_")
                 .setConsumerGroupId("legacy-read-group")
+                .setEnforceReadScope(false)
                 .setCommittedReadEnabled(true)
                 .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.LATEST);
 

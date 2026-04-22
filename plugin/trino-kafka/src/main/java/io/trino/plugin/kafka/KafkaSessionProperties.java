@@ -32,6 +32,7 @@ public final class KafkaSessionProperties
         implements SessionPropertiesProvider
 {
     private static final String TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED = "timestamp_upper_bound_force_push_down_enabled";
+    private static final String ENFORCE_READ_SCOPE = "enforce_read_scope";
     private static final String COMMITTED_READ_ENABLED = "committed_read_enabled";
     private static final String COMMITTED_READ_GROUP_ID = "committed_read_group_id";
     private static final String COMMITTED_READ_ALLOW_OFFSET_REWIND = "committed_read_allow_offset_rewind";
@@ -46,6 +47,11 @@ public final class KafkaSessionProperties
                         TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED,
                         "Enable or disable timestamp upper bound push down for topic createTime mode",
                         kafkaConfig.isTimestampUpperBoundPushDownEnabled(), false),
+                PropertyMetadata.booleanProperty(
+                        ENFORCE_READ_SCOPE,
+                        "Require scoped predicates for normal-mode Kafka reads",
+                        kafkaConfig.isEnforceReadScope(),
+                        false),
                 PropertyMetadata.booleanProperty(
                         COMMITTED_READ_ENABLED,
                         "Enable or disable committed-read mode",
@@ -98,6 +104,11 @@ public final class KafkaSessionProperties
     public static boolean isCommittedReadEnabled(ConnectorSession session)
     {
         return session.getProperty(COMMITTED_READ_ENABLED, Boolean.class);
+    }
+
+    public static boolean isEnforceReadScope(ConnectorSession session)
+    {
+        return session.getProperty(ENFORCE_READ_SCOPE, Boolean.class);
     }
 
     public static Optional<String> getCommittedReadGroupId(ConnectorSession session)
