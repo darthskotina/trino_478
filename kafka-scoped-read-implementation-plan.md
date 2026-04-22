@@ -2,212 +2,296 @@
 
 ## Goal
 
-Prevent accidental full-topic reads in the Kafka connector during normal read mode by requiring users to provide an explicit read scope in `WHERE`.
+Prevent accidental broad Kafka scans in normal read mode by rejecting topic reads unless the query supplies an explicit scope in `WHERE`.
 
 The restriction should:
 
-- apply by default in normal mode
-- not apply in committed-read mode
-- be overridable dynamically with a catalog session property
+- be enabled by default
+- apply only to normal mode
+- not apply to committed-read mode
+- remain dynamically overridable per session
 
-Accepted examples under the proposed rule:
+This change affects Kafka table scans only. Insert / producer paths are unaffected.
+
+## Semantic Choice
+
+The guard should be based on effective scan narrowing, not merely on the presence of domains in `KafkaTableHandle.constraint()`.
+
+In practice, that means the plan should validate only predicates that the Kafka connector actually uses to narrow a normal-mode read:
+
+- partition filtering via `_partition_id`
+- lower-bound pushdown via `_partition_offset`
+- lower-bound pushdown via `_timestamp`
+
+This is important because `_timestamp` upper bounds are not always honored in normal mode. In `KafkaFilterManager`, normal-mode `_timestamp` lower bounds are pushed down unconditionally, but upper bounds are only pushed down for LogAppendTime topics or when `timestamp_upper_bound_force_push_down_enabled` is enabled. Therefore:
+
+- `_partition_id = 1 AND _timestamp >= ...` is a valid scoped read
+- `_partition_id = 1 AND _timestamp < ...` is not a valid scoped read
+
+The same principle applies to `_partition_offset`:
+
+- `_partition_id = 1 AND _partition_offset >= 100` is valid
+- `_partition_id = 1 AND _partition_offset < 100` is not valid
+
+## Working Rule
+
+For normal mode, a Kafka read is scoped only if both of the following are true:
+
+1. The query includes an effective partition predicate.
+2. The query includes an effective lower bound on `_partition_offset` or `_timestamp`.
+
+### Effective partition predicate
+
+The `_partition_id` predicate must do one of the following:
+
+- resolve to an explicit finite set of partitions, such as `=` or `IN (...)`
+- or reduce the selected partitions below the full topic partition set
+
+This avoids treating trivial predicates as scope, such as:
+
+- `_partition_id IS NOT NULL`
+- `_partition_id > -1`
+
+Examples:
+
+- `_partition_id = 1` counts as partition scope
+- `_partition_id IN (1, 2, 3)` counts as partition scope
+- `_partition_id BETWEEN 1 AND 3` counts only if it actually reduces the selected partition set
+
+For single-partition topics, `_partition_id = 0` should still count as scoped, even though it selects all available partitions, because it is an explicit finite partition selection rather than a trivial all-range predicate.
+
+### Effective lower bound
+
+The second part of the scope must be a lower bound that advances the scan start:
+
+- `_partition_offset >= x`
+- `_partition_offset > x`
+- `_partition_offset = x`
+- `_timestamp >= t`
+- `_timestamp > t`
+- `_timestamp = t`
+
+Upper-bound-only predicates do not qualify:
+
+- `_partition_offset < x`
+- `_timestamp < t`
+
+For `_timestamp`, the rule intentionally depends only on the lower bound because that is the part Kafka normal-mode planning always uses to advance `partitionBeginOffsets`. Upper bounds may additionally narrow the end of the scan, but they must not satisfy the scope rule on their own.
+
+## Accepted Examples
 
 - `SELECT * FROM topic WHERE _partition_id = 1 AND _partition_offset > 100`
 - `SELECT * FROM topic WHERE _partition_id = 1 AND _partition_offset BETWEEN 100 AND 200`
 - `SELECT * FROM topic WHERE _partition_id = 1 AND _timestamp >= TIMESTAMP '2024-01-01 00:00:00.000'`
+- `SELECT * FROM topic WHERE _partition_id IN (1, 2, 3) AND _partition_offset >= 500`
 
-Rejected examples:
+## Rejected Examples
 
 - `SELECT * FROM topic`
 - `SELECT * FROM topic WHERE _partition_id = 1`
 - `SELECT * FROM topic WHERE _partition_offset > 100`
 - `SELECT * FROM topic WHERE _timestamp >= TIMESTAMP '2024-01-01 00:00:00.000'`
-
-## Scope Rule
-
-For normal mode only, treat a read as scoped if the pushed-down constraint contains:
-
-- a predicate on `_partition_id`, and
-- a predicate on either `_partition_offset` or `_timestamp`
-
-Notes:
-
-- lower-bound-only predicates are acceptable
-- `_timestamp` counts as a valid scoping mechanism
-- only pushdownable tuple-domain predicates are in scope for this change
-- logically equivalent but non-pushdownable expressions may still be rejected
+- `SELECT * FROM topic WHERE _partition_id = 1 AND _partition_offset < 100`
+- `SELECT * FROM topic WHERE _partition_id = 1 AND _timestamp < TIMESTAMP '2024-01-01 00:00:00.000'`
+- `SELECT * FROM topic WHERE _partition_id > -1 AND _partition_offset >= 100`
 
 ## Why This Is Viable
 
-The connector already has the right enforcement point and predicate plumbing:
+The connector already has the right structure for this feature:
 
-- `KafkaSessionProperties` already defines Kafka catalog session properties
-- `KafkaSplitManager#getSplits` already branches normal mode vs committed-read mode
-- `KafkaFilterManager#getKafkaFilterResult` already interprets `_partition_id`, `_partition_offset`, and `_timestamp` constraints into bounded Kafka reads
+- `KafkaSessionProperties` already exposes Kafka catalog session properties
+- `KafkaSplitManager#getSplits` already distinguishes normal mode from committed-read mode
+- `KafkaFilterManager#getKafkaFilterResult` already contains the connector's actual scan-narrowing rules for `_partition_id`, `_partition_offset`, and `_timestamp`
 
-This means the feature can be added without changing connector architecture.
+That means the new restriction can be implemented as a split-planning validation without changing connector architecture.
 
-## Recommended Design
+## Recommended Property Model
 
-### 1. Add a session-property override
+Use a positive safety flag with connector-config backing:
 
-Add a new Kafka catalog session property in:
+- catalog config: `kafka.enforce-read-scope`
+- session property: `enforce_read_scope`
+- default: `true`
 
-- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaSessionProperties.java`
+Reasoning:
 
-Recommended property:
+- positive polarity reads more clearly than `allow_unscoped_reads`
+- config backing lets operators disable the feature globally for staged rollout if needed
+- session override still provides the required dynamic escape hatch
 
-- name: `allow_unscoped_reads`
-- type: `boolean`
-- default: `false`
+Recommended behavior:
 
-Behavior:
+- catalog default comes from `KafkaConfig`
+- session property overrides the catalog default for the current session
 
-- `false`: normal-mode scans must satisfy the scope rule
-- `true`: bypass the restriction for the current session
+If the team prefers the original `allow_unscoped_reads` polarity, the semantics stay the same, but the plan should still include config backing for rollout control.
 
-This follows the existing connector pattern for dynamic behavior flags and avoids introducing a static connector config for an operational override.
+## Enforcement Point
 
-### 2. Enforce the rule during split planning
-
-Do not enforce this in `KafkaMetadata#applyFilter`.
-
-That method is part of predicate accumulation and pushdown negotiation. Rejecting there is riskier because the optimizer may still be refining the effective constraint.
-
-Instead, enforce during split planning in:
+Enforce the restriction during split planning in:
 
 - `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaSplitManager.java`
 
-Recommended flow:
+Do not enforce it in `KafkaMetadata#applyFilter`.
 
-1. Determine whether committed-read mode is enabled.
-2. If committed-read mode is enabled, skip the new restriction entirely.
-3. If committed-read mode is disabled and `allow_unscoped_reads` is `false`, validate the table constraint before split generation.
-4. If validation fails, throw a `TrinoException` with `KAFKA_SPLIT_ERROR`.
+Reasoning:
 
-This keeps the check close to the final read shape and ensures failure happens before broker work begins.
+- `applyFilter` is invoked during predicate accumulation and may be called multiple times
+- the table handle seen in `getSplits` reflects the final accumulated pushdown the connector will plan against
+- the guard should run where the connector knows the final scan semantics
 
-### 3. Keep predicate interpretation logic in `KafkaFilterManager`
+The enforcement should be based on `KafkaTableHandle.constraint()`, not on the `Constraint constraint` parameter or `DynamicFilter dynamicFilter` passed to `getSplits`. Today the Kafka connector plans from the handle constraint, and the plan should state that explicitly so the assumption is visible.
 
-Add a dedicated helper in:
+Queries that do not produce a Kafka table scan, such as metadata-only statements, are unaffected. If Trino later adds a no-scan optimization for some Kafka read shape, the enforcement assumption should be revisited.
 
-- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaFilterManager.java`
+## Recommended Design
 
-Recommended helper responsibilities:
+### 1. Add config-backed session property
 
-- inspect `KafkaTableHandle.constraint()`
-- resolve internal Kafka field names via `KafkaInternalFieldManager`
-- detect whether `_partition_id` domain is present
-- detect whether `_partition_offset` or `_timestamp` domain is present
-- reject unscoped normal-mode reads
+Extend:
 
-This keeps Kafka internal-field logic in one place alongside the existing committed-mode predicate validation.
-
-### 4. Respect custom internal field prefixes
-
-Do not hardcode `_partition_id`, `_partition_offset`, and `_timestamp` in detection logic.
-
-Instead, resolve the effective column names through:
-
-- `KafkaInternalFieldManager`
-
-Why:
-
-- the connector supports configurable internal-field prefixes
-- hardcoded names would silently break installations using a custom prefix
-
-The user-facing error message can still mention the default canonical field names for clarity.
-
-### 5. Leave committed-read behavior unchanged
-
-Committed-read mode already has dedicated predicate restrictions and planning behavior. The new scoped-read rule should not run there.
-
-That avoids interference with:
-
-- existing committed-read validation
-- rewind behavior
-- committed offset semantics
-- committed-read test coverage already present on this branch
-
-## Detailed Implementation Steps
-
-### Step 1. Extend `KafkaSessionProperties`
+- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaConfig.java`
+- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaSessionProperties.java`
 
 Add:
 
-- property constant for `allow_unscoped_reads`
-- boolean property metadata with default `false`
-- accessor method `isAllowUnscopedReads(ConnectorSession session)`
+- config field and accessor for `kafka.enforce-read-scope`
+- session property `enforce_read_scope`
+- helper accessor in `KafkaSessionProperties`
 
 Acceptance for this step:
 
-- property appears in connector session properties
-- property is readable from `ConnectorSession`
+- the catalog default is centrally configurable
+- the session property can override it dynamically
 
-### Step 2. Add scoped-read validation helper
+### 2. Add dedicated scoped-read validation
 
-Add a helper in `KafkaFilterManager` with a shape like:
+Add a helper in:
 
-- `validateNormalReadScope(ConnectorSession session, KafkaTableHandle kafkaTableHandle, boolean committedReadMode)`
+- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaFilterManager.java`
 
-Expected logic:
+Recommended shape:
 
-- return immediately if `committedReadMode` is `true`
-- return immediately if `allow_unscoped_reads` is `true`
-- read `TupleDomain<ColumnHandle>` from `kafkaTableHandle.constraint()`
-- if no domain exists or no relevant internal-field predicates exist, reject
-- require both:
-  - `_partition_id` domain present
-  - `_partition_offset` or `_timestamp` domain present
+- `validateNormalReadScope(ConnectorSession session, KafkaTableHandle tableHandle, List<PartitionInfo> partitionInfos)`
 
-Recommended error message:
+Recommended logic:
 
-- `Normal Kafka reads require scope predicates on '_partition_id' and either '_partition_offset' or '_timestamp' for topic '%s'. Set session property 'allow_unscoped_reads' = true to override.`
+- return immediately if committed-read mode is enabled
+- return immediately if `enforce_read_scope` is `false`
+- if `tableHandle.constraint().isNone()`, treat the read as empty and skip rejection
+- if `tableHandle.constraint().isAll()`, reject immediately
+- resolve effective internal field names through `KafkaInternalFieldManager`
+- read domains from `TupleDomain`
+- require a non-trivial partition scope
+- require an effective lower bound on `_partition_offset` or `_timestamp`
 
-### Step 3. Invoke validation from `KafkaSplitManager#getSplits`
+The helper should reuse the same semantics already embedded in Kafka planning where possible:
 
-Call the new validation before offset discovery and split generation.
+- use `filterValuesByDomain` or equivalent logic to evaluate effective partition selection
+- use lower-bound detection, not just domain presence, for `_partition_offset` and `_timestamp`
 
-That is the right place because:
+For `_timestamp`, the helper should explicitly ignore upper-bound-only domains as qualifying scope, even if the domain exists in the handle.
 
-- the final table constraint is available
-- the mode decision is already made there
-- failures happen before expensive Kafka interactions
+### 3. Run validation before expensive Kafka work
 
-### Step 4. Keep existing committed-mode validation intact
+Invoke the validation from `KafkaSplitManager#getSplits` before offset discovery and split generation.
 
-Do not merge the new rule into committed-read predicate validation.
+Recommended order:
 
-The code should make the separation explicit:
+1. inspect mode and enforcement property
+2. short-circuit empty reads if needed
+3. validate scoped-read requirement for normal mode
+4. continue with offset discovery and split planning
 
-- committed-read mode: existing rules only
-- normal mode: new scoped-read rule plus existing pushdown behavior
+This keeps the failure cheap and avoids starting Kafka-side planning for a read that should be rejected.
 
-### Step 5. Add targeted tests
+### 4. Keep committed-read behavior separate
 
-Add focused tests at both unit/split-manager level and integration level.
+Do not fold this logic into the committed-read predicate validation.
+
+The separation should stay explicit:
+
+- committed-read mode uses its current validation rules
+- normal mode uses the new scoped-read rule
+
+That avoids unintended interaction with:
+
+- committed offsets
+- rewind behavior
+- committed-read predicate restrictions already present on this branch
+
+### 5. Use a user-error code, not a Kafka planning failure code
+
+The rejection is a guardrail on query shape, not a Kafka-side split failure.
+
+Recommended error-code choice:
+
+- `StandardErrorCode.QUERY_REJECTED`
+
+Alternative:
+
+- a new connector-local error code such as `KAFKA_UNSCOPED_READ`
+
+Avoid reusing `KAFKA_SPLIT_ERROR` for this case.
+
+### 6. Format the error message with resolved internal field names
+
+Do not hardcode `_partition_id`, `_partition_offset`, and `_timestamp` in the error text.
+
+Instead, resolve the effective names via `KafkaInternalFieldManager` so installations with a custom prefix see accurate guidance.
+
+Recommended message shape:
+
+- `Kafka reads in normal mode require scope predicates on '%s' and a lower bound on either '%s' or '%s' for topic '%s'. Set session property 'enforce_read_scope' = false to override.`
+
+## Edge Cases To Handle Explicitly
+
+### `constraint.isAll()`
+
+Reject as unscoped when enforcement is enabled.
+
+### `constraint.isNone()`
+
+Treat as an empty read rather than an unscoped read. The plan should not reject a query that provably scans nothing.
+
+### `_partition_id IN (...)`
+
+This should pass the partition-scope check. The existing partition filtering logic already handles discrete value sets cleanly.
+
+### `_timestamp` upper bounds on CreateTime topics
+
+These must not satisfy the scope rule by themselves because the connector may keep scanning from log start unless upper-bound pushdown is enabled.
+
+### Single-partition topics
+
+Explicit singleton partition selection should still count as scope even if it selects every available partition in that topic.
 
 ## Test Plan
 
-### Unit or split-manager tests
+### Dedicated split-manager test class
 
-Recommended coverage in Kafka connector tests:
+Use a dedicated test host:
 
-- normal mode rejects unconstrained scan
-- normal mode rejects only `_partition_id`
-- normal mode rejects only `_partition_offset`
-- normal mode rejects only `_timestamp`
-- normal mode accepts `_partition_id` plus `_partition_offset`
-- normal mode accepts `_partition_id` plus `_timestamp`
-- normal mode override property allows unconstrained scan
-- committed-read mode is not affected by the new restriction
+- `plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaScopedReadSplitManager.java`
 
-Best fit:
+This is cleaner than extending `TestKafkaCommittedReadSplitManager`, which should remain focused on committed-read behavior.
 
-- extend `TestKafkaCommittedReadSplitManager` with new normal-mode planning cases, or
-- add a dedicated split-manager test class if cleaner
+Recommended coverage:
 
-### Integration tests
+- rejects unconstrained normal-mode scan
+- rejects `_partition_id` only
+- rejects `_partition_offset` only
+- rejects `_timestamp` only
+- rejects `_partition_id = 1 AND _partition_offset < 100`
+- rejects `_partition_id = 1 AND _timestamp < ...`
+- rejects trivial partition predicate such as `_partition_id > -1`
+- accepts `_partition_id = 1 AND _partition_offset >= 100`
+- accepts `_partition_id = 1 AND _timestamp >= ...`
+- accepts `_partition_id IN (1, 2, 3) AND _partition_offset >= 100`
+- allows unscoped scan when `enforce_read_scope = false`
+- proves committed-read mode is unaffected
+
+### Integration coverage
 
 Extend:
 
@@ -218,77 +302,73 @@ Recommended scenarios:
 - `SELECT count(*) FROM default.<topic>` fails by default
 - `SELECT count(*) FROM default.<topic> WHERE _partition_id = 1 AND _partition_offset > 2` succeeds
 - `SELECT count(*) FROM default.<topic> WHERE _partition_id = 1 AND _timestamp >= TIMESTAMP '...'` succeeds
-- the unscoped query succeeds when `kafka.allow_unscoped_reads = true`
+- `SELECT count(*) FROM default.<topic> WHERE _partition_id = 1 AND _timestamp < TIMESTAMP '...'` fails
+- unscoped query succeeds when `kafka.enforce_read_scope = false`
 
-This gives broker-backed evidence that the default restriction works while existing bounded-read behavior still functions.
+The integration tests should make clear that the guard is tied to actual scan planning, not just SQL syntax.
 
-## Expected Complexity
+## Complexity
 
-Implementation complexity is low to medium.
+Implementation complexity remains low to medium.
 
 Low complexity aspects:
 
-- no change to connector architecture
-- no new table handle fields required
-- session-property plumbing already exists
-- split-planning validation is already a connector pattern
+- no connector-architecture change
+- existing predicate plumbing can be reused
+- config and session property patterns already exist
 
 Medium complexity aspects:
 
-- the behavior depends on what Trino turns into tuple domains
-- some logically scoped queries may still fail if they are not pushdownable
-- tests need to be careful to distinguish validation failure from unrelated Kafka behavior
+- the validation must align with actual scan-narrowing semantics, not raw domain presence
+- partition-scope detection must distinguish explicit or narrowing predicates from trivial ones
+- tests need to cover timestamp pushdown nuances explicitly
 
-## Risks and Tradeoffs
+## Tradeoffs
 
 ### 1. Tuple-domain-only enforcement
 
-This change intentionally relies on pushed-down `TupleDomain` constraints, not arbitrary expression analysis.
+The plan still intentionally relies on pushed-down `TupleDomain` constraints rather than arbitrary `Constraint.getExpression()` analysis.
 
 Tradeoff:
 
-- simpler and more robust implementation
-- some non-pushdownable scoped predicates may still be rejected
+- simpler and more predictable implementation
+- logically scoped but non-pushdownable predicates may still be rejected
 
-This is acceptable for the current requirement.
+That is acceptable for this feature.
 
-### 2. “Scoped” does not mean “small”
+### 2. Scoped does not mean small
 
-The chosen rule prevents the worst accidental full-topic scans, but it does not guarantee a tiny read.
+Even with the tighter rule, a scoped read can still be large:
 
-Examples:
+- `_partition_id = 1 AND _partition_offset > 10` may read a long tail
+- `_partition_id IN (1, 2, 3) AND _timestamp >= ...` may still span substantial data
 
-- `_partition_id = 1 AND _partition_offset > 10` may still read a large tail
-- `_partition_id IN (...) AND _timestamp >= ...` may still span substantial data
+This change is a guardrail against accidental broad scans, not a byte- or row-budget limiter.
 
-This is still a meaningful operational safeguard and matches the agreed requirement.
+### 3. Rollout control
 
-### 3. Backward compatibility
-
-Queries that currently work in normal mode without scope predicates will start failing by default.
-
-Mitigation:
-
-- explicit session override via `allow_unscoped_reads`
-- clear error message with remediation
+Adding config backing is deliberate. Without it, operators would need to disable enforcement session by session during rollout or incident response.
 
 ## Acceptance Criteria
 
 The change is complete when all of the following are true:
 
 - normal-mode Kafka scans without scope predicates fail by default
-- normal-mode Kafka scans with `_partition_id` plus `_partition_offset` succeed
-- normal-mode Kafka scans with `_partition_id` plus `_timestamp` succeed
+- upper-bound-only `_partition_offset` or `_timestamp` predicates do not satisfy the scope rule
+- trivial `_partition_id` predicates do not satisfy the scope rule
+- explicit finite partition selection plus lower-bound offset or timestamp predicates succeed
+- `_partition_id IN (...)` plus a valid lower bound succeeds
 - committed-read mode remains unaffected
-- the session property `allow_unscoped_reads` disables the restriction dynamically
-- targeted tests cover the default restriction, accepted scoped reads, override behavior, and committed-read non-regression
+- the session property can disable enforcement dynamically
+- the catalog config can change the default globally
+- targeted tests cover default rejection, accepted scoped reads, override behavior, timestamp nuance, partition triviality, and committed-read non-regression
 
-## Out of Scope
+## Out Of Scope
 
 The following are intentionally not part of this change:
 
 - analyzing arbitrary `Constraint.getExpression()` trees
-- planner-level query-shape rejection outside split planning
-- limiting the exact size of a scoped read window
+- planner-level rejection outside split planning
+- enforcing exact row-count or byte-count limits on scoped reads
 - changing committed-read semantics
-- introducing a static catalog config to replace the session override
+- changing metadata-only or non-scan statement behavior
