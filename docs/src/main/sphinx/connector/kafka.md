@@ -151,6 +151,21 @@ or `timestamp_upper_bound_force_push_down_enabled` session property.
 
 This property is optional; the default is `false`.
 
+## Committed-read session properties
+
+This branch also adds committed-read session properties that are documented in
+[plugin/trino-kafka/README.md](../../plugin/trino-kafka/README.md), including:
+
+- `committed_read_enabled`
+- `committed_read_group_id`
+- `committed_read_allow_offset_rewind`
+- `committed_read_max_rows_per_partition`
+
+`committed_read_max_rows_per_partition` limits committed-read split planning per
+selected Kafka partition. `0` means unlimited. The cap applies only in
+committed-read mode and does not change default-mode `kafka.messages-per-split`
+planning.
+
 ### `kafka.hide-internal-columns`
 
 In addition to the data columns defined in a table description file, the

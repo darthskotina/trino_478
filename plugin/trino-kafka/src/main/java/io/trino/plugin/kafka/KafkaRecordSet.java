@@ -323,6 +323,8 @@ public class KafkaRecordSet
             if (!fullyConsumed) {
                 return false;
             }
+            // Committed-read mode intentionally advances to the planned split end, which may be
+            // a capped batch boundary rather than the broker snapshot end observed during planning.
             return kafkaConsumer.position(topicPartition) >= split.getMessagesRange().end();
         }
 

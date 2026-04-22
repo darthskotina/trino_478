@@ -65,9 +65,15 @@ public class TestKafkaCommittedReadMode
     private String latestTopic;
     private String createTimeTopic;
     private String duplicateTopic;
+    private String earliestBatchedTopic;
+    private String latestBatchedTopic;
+    private String multiPartitionBatchedTopic;
     private String rewindTopic;
+    private String rewindBatchedTopic;
     private String rewindEqualityTopic;
+    private String rewindEqualityBatchedTopic;
     private String rewindGreaterThanTopic;
+    private String rewindGreaterThanBatchedTopic;
     private String rewindSparseTopic;
     private String rewindMissingOffsetTopic;
     private String rewindInvalidOffsetTopic;
@@ -90,9 +96,15 @@ public class TestKafkaCommittedReadMode
         latestTopic = newTopicName("latest");
         createTimeTopic = newTopicName("create_time");
         duplicateTopic = newTopicName("duplicate");
+        earliestBatchedTopic = newTopicName("earliest_batched");
+        latestBatchedTopic = newTopicName("latest_batched");
+        multiPartitionBatchedTopic = newTopicName("multi_partition_batched");
         rewindTopic = newTopicName("rewind");
+        rewindBatchedTopic = newTopicName("rewind_batched");
         rewindEqualityTopic = newTopicName("rewind_equal");
+        rewindEqualityBatchedTopic = newTopicName("rewind_equal_batched");
         rewindGreaterThanTopic = newTopicName("rewind_greater_than");
+        rewindGreaterThanBatchedTopic = newTopicName("rewind_greater_than_batched");
         rewindSparseTopic = newTopicName("rewind_sparse");
         rewindMissingOffsetTopic = newTopicName("rewind_missing");
         rewindInvalidOffsetTopic = newTopicName("rewind_invalid");
@@ -110,9 +122,15 @@ public class TestKafkaCommittedReadMode
                         .put(createEmptyTopicDescription(latestTopic, new SchemaTableName("default", latestTopic)))
                         .put(createEmptyTopicDescription(createTimeTopic, new SchemaTableName("default", createTimeTopic)))
                         .put(createEmptyTopicDescription(duplicateTopic, new SchemaTableName("default", duplicateTopic)))
+                        .put(createEmptyTopicDescription(earliestBatchedTopic, new SchemaTableName("default", earliestBatchedTopic)))
+                        .put(createEmptyTopicDescription(latestBatchedTopic, new SchemaTableName("default", latestBatchedTopic)))
+                        .put(createEmptyTopicDescription(multiPartitionBatchedTopic, new SchemaTableName("default", multiPartitionBatchedTopic)))
                         .put(createEmptyTopicDescription(rewindTopic, new SchemaTableName("default", rewindTopic)))
+                        .put(createEmptyTopicDescription(rewindBatchedTopic, new SchemaTableName("default", rewindBatchedTopic)))
                         .put(createEmptyTopicDescription(rewindEqualityTopic, new SchemaTableName("default", rewindEqualityTopic)))
+                        .put(createEmptyTopicDescription(rewindEqualityBatchedTopic, new SchemaTableName("default", rewindEqualityBatchedTopic)))
                         .put(createEmptyTopicDescription(rewindGreaterThanTopic, new SchemaTableName("default", rewindGreaterThanTopic)))
+                        .put(createEmptyTopicDescription(rewindGreaterThanBatchedTopic, new SchemaTableName("default", rewindGreaterThanBatchedTopic)))
                         .put(createEmptyTopicDescription(rewindSparseTopic, new SchemaTableName("default", rewindSparseTopic)))
                         .put(createEmptyTopicDescription(rewindMissingOffsetTopic, new SchemaTableName("default", rewindMissingOffsetTopic)))
                         .put(createEmptyTopicDescription(rewindInvalidOffsetTopic, new SchemaTableName("default", rewindInvalidOffsetTopic)))
@@ -146,9 +164,15 @@ public class TestKafkaCommittedReadMode
         testingKafka.createTopicWithConfig(1, 1, latestTopic, false);
         testingKafka.createTopicWithConfig(1, 1, createTimeTopic, false);
         testingKafka.createTopicWithConfig(1, 1, duplicateTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, earliestBatchedTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, latestBatchedTopic, false);
+        testingKafka.createTopicWithConfig(2, 1, multiPartitionBatchedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, rewindBatchedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindEqualityTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, rewindEqualityBatchedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindGreaterThanTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, rewindGreaterThanBatchedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindSparseTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindMissingOffsetTopic, false);
         testingKafka.createTopicWithConfig(1, 1, rewindInvalidOffsetTopic, false);
@@ -207,6 +231,27 @@ public class TestKafkaCommittedReadMode
     }
 
     @Test
+    public void testCommittedReadCapBatchesAndResumesFromCommittedOffset()
+    {
+        sendMessages(earliestBatchedTopic, 25);
+
+        String groupId = "group_batched_" + UUID.randomUUID().toString().replace("-", "");
+        Session session = committedReadSession(EARLIEST_CATALOG, groupId, 10L);
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", earliestBatchedTopic)).getOnlyValue()).isEqualTo(10L);
+        assertThat(getCommittedOffset(groupId, earliestBatchedTopic)).hasValue(10L);
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", earliestBatchedTopic)).getOnlyValue()).isEqualTo(10L);
+        assertThat(getCommittedOffset(groupId, earliestBatchedTopic)).hasValue(20L);
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", earliestBatchedTopic)).getOnlyValue()).isEqualTo(5L);
+        assertThat(getCommittedOffset(groupId, earliestBatchedTopic)).hasValue(25L);
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", earliestBatchedTopic)).getOnlyValue()).isEqualTo(0L);
+        assertThat(getCommittedOffset(groupId, earliestBatchedTopic)).hasValue(25L);
+    }
+
+    @Test
     public void testCommittedReadSupportsLimitQueries()
     {
         sendMessages(earlyCloseTopic, 50_000);
@@ -243,6 +288,27 @@ public class TestKafkaCommittedReadMode
     }
 
     @Test
+    public void testCommittedReadCapAppliesPerPartition()
+    {
+        sendMessages(multiPartitionBatchedTopic, 12);
+
+        String groupId = "group_multi_partition_batched_" + UUID.randomUUID().toString().replace("-", "");
+        Session session = committedReadSession(EARLIEST_CATALOG, groupId, 2L);
+
+        assertQuery(
+                session,
+                format("SELECT _partition_id, _partition_offset FROM default.%s ORDER BY 1, 2", multiPartitionBatchedTopic),
+                "VALUES " +
+                        "(CAST(0 AS BIGINT), CAST(0 AS BIGINT)), " +
+                        "(CAST(0 AS BIGINT), CAST(1 AS BIGINT)), " +
+                        "(CAST(1 AS BIGINT), CAST(0 AS BIGINT)), " +
+                        "(CAST(1 AS BIGINT), CAST(1 AS BIGINT))");
+        assertThat(getCommittedOffsets(groupId, multiPartitionBatchedTopic))
+                .containsEntry(0, 2L)
+                .containsEntry(1, 2L);
+    }
+
+    @Test
     public void testLatestPolicyCreatesCheckpointWithoutReadingHistoricalRows()
     {
         sendMessages(latestTopic, 12);
@@ -252,6 +318,18 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", latestTopic)).getOnlyValue()).isEqualTo(0L);
         assertThat(getCommittedOffset(groupId, latestTopic)).hasValue(getPartitionEndOffset(latestTopic));
+    }
+
+    @Test
+    public void testLatestPolicyCheckpointIgnoresCommittedReadCap()
+    {
+        sendMessages(latestBatchedTopic, 12);
+
+        String groupId = "group_latest_batched_" + UUID.randomUUID().toString().replace("-", "");
+        Session session = committedReadSession(LATEST_CATALOG, groupId, 5L);
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", latestBatchedTopic)).getOnlyValue()).isEqualTo(0L);
+        assertThat(getCommittedOffset(groupId, latestBatchedTopic)).hasValue(getPartitionEndOffset(latestBatchedTopic));
     }
 
     @Test
@@ -354,6 +432,25 @@ public class TestKafkaCommittedReadMode
     }
 
     @Test
+    public void testCommittedReadRewindWithCapMovesOffsetBackwardOnlyToBatchEnd()
+    {
+        sendMessages(rewindBatchedTopic, 20);
+
+        String groupId = "group_rewind_batched_" + UUID.randomUUID().toString().replace("-", "");
+        Session baseSession = committedReadSession(EARLIEST_CATALOG, groupId);
+        Session rewindSession = committedReadRewindSession(EARLIEST_CATALOG, groupId, 4L);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindBatchedTopic)).getOnlyValue()).isEqualTo(20L);
+        assertThat(getCommittedOffset(groupId, rewindBatchedTopic)).hasValue(20L);
+
+        assertThat(computeActual(rewindSession, format("SELECT count(*) FROM default.%s WHERE _partition_offset >= 5", rewindBatchedTopic)).getOnlyValue()).isEqualTo(4L);
+        assertThat(getCommittedOffset(groupId, rewindBatchedTopic)).hasValue(9L);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindBatchedTopic)).getOnlyValue()).isEqualTo(11L);
+        assertThat(getCommittedOffset(groupId, rewindBatchedTopic)).hasValue(20L);
+    }
+
+    @Test
     public void testCommittedReadRewindSupportsExactOffsetPredicate()
     {
         sendMessages(rewindEqualityTopic, 20);
@@ -373,6 +470,22 @@ public class TestKafkaCommittedReadMode
     }
 
     @Test
+    public void testCommittedReadRewindEqualityWithCapStillCommitsSingleRow()
+    {
+        sendMessages(rewindEqualityBatchedTopic, 20);
+
+        String groupId = "group_rewind_equal_batched_" + UUID.randomUUID().toString().replace("-", "");
+        Session baseSession = committedReadSession(EARLIEST_CATALOG, groupId);
+        Session rewindSession = committedReadRewindSession(EARLIEST_CATALOG, groupId, 10L);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindEqualityBatchedTopic)).getOnlyValue()).isEqualTo(20L);
+        assertThat(getCommittedOffset(groupId, rewindEqualityBatchedTopic)).hasValue(20L);
+
+        assertThat(computeActual(rewindSession, format("SELECT count(*) FROM default.%s WHERE _partition_offset = 5", rewindEqualityBatchedTopic)).getOnlyValue()).isEqualTo(1L);
+        assertThat(getCommittedOffset(groupId, rewindEqualityBatchedTopic)).hasValue(6L);
+    }
+
+    @Test
     public void testCommittedReadRewindSupportsGreaterThanOffsetPredicate()
     {
         sendMessages(rewindGreaterThanTopic, 20);
@@ -389,6 +502,22 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindGreaterThanTopic)).getOnlyValue()).isEqualTo(12L);
         assertThat(getCommittedOffset(groupId, rewindGreaterThanTopic)).hasValue(20L);
+    }
+
+    @Test
+    public void testCommittedReadRewindGreaterThanWithCapCommitsOnePastLastEmittedOffset()
+    {
+        sendMessages(rewindGreaterThanBatchedTopic, 20);
+
+        String groupId = "group_rewind_gt_batched_" + UUID.randomUUID().toString().replace("-", "");
+        Session baseSession = committedReadSession(EARLIEST_CATALOG, groupId);
+        Session rewindSession = committedReadRewindSession(EARLIEST_CATALOG, groupId, 3L);
+
+        assertThat(computeActual(baseSession, format("SELECT count(*) FROM default.%s", rewindGreaterThanBatchedTopic)).getOnlyValue()).isEqualTo(20L);
+        assertThat(getCommittedOffset(groupId, rewindGreaterThanBatchedTopic)).hasValue(20L);
+
+        assertThat(computeActual(rewindSession, format("SELECT count(*) FROM default.%s WHERE _partition_offset > 5", rewindGreaterThanBatchedTopic)).getOnlyValue()).isEqualTo(3L);
+        assertThat(getCommittedOffset(groupId, rewindGreaterThanBatchedTopic)).hasValue(9L);
     }
 
     @Test
@@ -445,23 +574,41 @@ public class TestKafkaCommittedReadMode
 
     private Session committedReadSession(String catalog, String groupId)
     {
-        return Session.builder(getSession())
+        return committedReadSession(catalog, groupId, null);
+    }
+
+    private Session committedReadSession(String catalog, String groupId, Long maxRowsPerPartition)
+    {
+        Session.SessionBuilder sessionBuilder = Session.builder(getSession())
                 .setCatalog(catalog)
                 .setSchema("default")
                 .setCatalogSessionProperty(catalog, "committed_read_enabled", "true")
-                .setCatalogSessionProperty(catalog, "committed_read_group_id", groupId)
-                .build();
+                .setCatalogSessionProperty(catalog, "committed_read_group_id", groupId);
+        if (maxRowsPerPartition != null) {
+            sessionBuilder.setCatalogSessionProperty(catalog, "committed_read_max_rows_per_partition", Long.toString(maxRowsPerPartition));
+        }
+
+        return sessionBuilder.build();
     }
 
     private Session committedReadRewindSession(String catalog, String groupId)
     {
-        return Session.builder(getSession())
+        return committedReadRewindSession(catalog, groupId, null);
+    }
+
+    private Session committedReadRewindSession(String catalog, String groupId, Long maxRowsPerPartition)
+    {
+        Session.SessionBuilder sessionBuilder = Session.builder(getSession())
                 .setCatalog(catalog)
                 .setSchema("default")
                 .setCatalogSessionProperty(catalog, "committed_read_enabled", "true")
                 .setCatalogSessionProperty(catalog, "committed_read_group_id", groupId)
-                .setCatalogSessionProperty(catalog, "committed_read_allow_offset_rewind", "true")
-                .build();
+                .setCatalogSessionProperty(catalog, "committed_read_allow_offset_rewind", "true");
+        if (maxRowsPerPartition != null) {
+            sessionBuilder.setCatalogSessionProperty(catalog, "committed_read_max_rows_per_partition", Long.toString(maxRowsPerPartition));
+        }
+
+        return sessionBuilder.build();
     }
 
     private Optional<Long> getCommittedOffset(String groupId, String topicName)

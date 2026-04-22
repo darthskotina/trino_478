@@ -56,6 +56,20 @@ public class TestKafkaRecordSetCommittedRead
     }
 
     @Test
+    public void testCommitFailurePropagatesForFullyConsumedCappedDataSplit()
+    {
+        FailingCommitConsumer consumer = new FailingCommitConsumer();
+        RecordCursor cursor = recordSet(consumer, cappedDataSplit()).cursor();
+
+        assertThat(cursor.advanceNextPosition()).isFalse();
+        assertThatThrownBy(cursor::close)
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("Failed to commit Kafka offset 7");
+        assertThat(consumer.commitCalls).isEqualTo(1);
+        assertThat(consumer.closed).isTrue();
+    }
+
+    @Test
     public void testRuntimeOffsetInvalidationSuppressesCommit()
     {
         OffsetOutOfRangeTestConsumer consumer = new OffsetOutOfRangeTestConsumer();
@@ -101,10 +115,53 @@ public class TestKafkaRecordSetCommittedRead
     }
 
     @Test
+    public void testFullyConsumedCappedSplitCommitsPlannedBatchEnd()
+    {
+        ConsumingCommitConsumer consumer = new ConsumingCommitConsumer(5, 6);
+        RecordCursor cursor = recordSet(consumer, cappedDataSplit()).cursor();
+
+        assertThat(cursor.advanceNextPosition()).isTrue();
+        assertThat(cursor.advanceNextPosition()).isTrue();
+        assertThat(cursor.advanceNextPosition()).isFalse();
+        cursor.close();
+
+        assertThat(consumer.commitCalls).isEqualTo(1);
+        assertThat(consumer.lastCommittedOffset).isEqualTo(7L);
+        assertThat(consumer.closed).isTrue();
+    }
+
+    @Test
+    public void testCappedSplitEarlyCloseSuppressesCommit()
+    {
+        TrackingCommitConsumer consumer = new TrackingCommitConsumer(7);
+        RecordCursor cursor = recordSet(consumer, cappedDataSplit()).cursor();
+
+        cursor.close();
+
+        assertThat(consumer.commitCalls).isZero();
+        assertThat(consumer.closed).isTrue();
+    }
+
+    @Test
     public void testFullyConsumedRewindSplitCommitsWindowEnd()
     {
         ConsumingCommitConsumer consumer = new ConsumingCommitConsumer(5);
         RecordCursor cursor = recordSet(consumer, rewindDataSplit()).cursor();
+
+        assertThat(cursor.advanceNextPosition()).isTrue();
+        assertThat(cursor.advanceNextPosition()).isFalse();
+        cursor.close();
+
+        assertThat(consumer.commitCalls).isEqualTo(1);
+        assertThat(consumer.lastCommittedOffset).isEqualTo(6L);
+        assertThat(consumer.closed).isTrue();
+    }
+
+    @Test
+    public void testEqualityRewindSplitWithLargerCapStillCommitsSingleRowEnd()
+    {
+        ConsumingCommitConsumer consumer = new ConsumingCommitConsumer(5);
+        RecordCursor cursor = recordSet(consumer, equalityRewindSplitWithLargeCap()).cursor();
 
         assertThat(cursor.advanceNextPosition()).isTrue();
         assertThat(cursor.advanceNextPosition()).isFalse();
@@ -182,6 +239,25 @@ public class TestKafkaRecordSetCommittedRead
     }
 
     private static KafkaSplit rewindDataSplit()
+    {
+        return equalityRewindSplitWithLargeCap();
+    }
+
+    private static KafkaSplit cappedDataSplit()
+    {
+        return new KafkaSplit(
+                "data_topic",
+                DummyRowDecoder.NAME,
+                DummyRowDecoder.NAME,
+                Optional.empty(),
+                Optional.empty(),
+                0,
+                new Range(5, 7),
+                Optional.of(new KafkaCommittedReadSplitMetadata("group-capped", false, 7)),
+                io.trino.spi.HostAddress.fromString("localhost:9092"));
+    }
+
+    private static KafkaSplit equalityRewindSplitWithLargeCap()
     {
         return new KafkaSplit(
                 "data_topic",

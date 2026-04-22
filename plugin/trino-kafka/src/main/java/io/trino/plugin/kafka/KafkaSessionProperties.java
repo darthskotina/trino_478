@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static io.trino.spi.session.PropertyMetadata.longProperty;
 import static io.trino.spi.session.PropertyMetadata.stringProperty;
 import static java.lang.String.format;
 
@@ -34,6 +35,7 @@ public final class KafkaSessionProperties
     private static final String COMMITTED_READ_ENABLED = "committed_read_enabled";
     private static final String COMMITTED_READ_GROUP_ID = "committed_read_group_id";
     private static final String COMMITTED_READ_ALLOW_OFFSET_REWIND = "committed_read_allow_offset_rewind";
+    private static final String COMMITTED_READ_MAX_ROWS_PER_PARTITION = "committed_read_max_rows_per_partition";
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
@@ -62,6 +64,16 @@ public final class KafkaSessionProperties
                         COMMITTED_READ_ALLOW_OFFSET_REWIND,
                         "Allow committed-read mode to honor explicit _partition_offset lower bounds and commit a lower offset window when fully consumed",
                         false,
+                        false),
+                longProperty(
+                        COMMITTED_READ_MAX_ROWS_PER_PARTITION,
+                        "Limit committed-read split planning to at most this many source offsets per selected partition; 0 means unlimited",
+                        0L,
+                        value -> {
+                            if (value < 0) {
+                                throw new TrinoException(INVALID_SESSION_PROPERTY, format("Session property '%s' must be greater than or equal to 0", COMMITTED_READ_MAX_ROWS_PER_PARTITION));
+                            }
+                        },
                         false));
     }
 
@@ -96,6 +108,11 @@ public final class KafkaSessionProperties
     public static boolean isCommittedReadAllowOffsetRewind(ConnectorSession session)
     {
         return session.getProperty(COMMITTED_READ_ALLOW_OFFSET_REWIND, Boolean.class);
+    }
+
+    public static long getCommittedReadMaxRowsPerPartition(ConnectorSession session)
+    {
+        return session.getProperty(COMMITTED_READ_MAX_ROWS_PER_PARTITION, Long.class);
     }
 
     public static String getRequiredCommittedReadGroupId(ConnectorSession session)

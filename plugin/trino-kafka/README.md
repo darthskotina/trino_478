@@ -41,6 +41,7 @@ Session properties used by committed-read mode:
 - `committed_read_enabled`
 - `committed_read_group_id`
 - `committed_read_allow_offset_rewind`
+- `committed_read_max_rows_per_partition`
 
 Legacy compatibility property:
 
@@ -114,6 +115,29 @@ This feature does not provide:
 - whole-query atomic offset commits
 - commit-on-query-success semantics
 
+## Per-Partition Batch Cap
+
+Committed-read mode can optionally cap split planning with session property
+`committed_read_max_rows_per_partition`.
+
+Rules:
+
+- the cap applies in committed-read mode only
+- `0` means unlimited and preserves the previous behavior
+- the cap is per selected partition, not global per topic or per query
+- the cap narrows the planned offset window; it does not guarantee that the
+  query returns exactly that many rows
+- Kafka realities such as compaction or tombstones may cause fewer rows than
+  the capped offset span
+- default mode still uses `kafka.messages-per-split`; the new session property
+  does not affect default-mode planning
+
+Example:
+
+- a two-partition query with `committed_read_max_rows_per_partition = 1000`
+  may read up to `2000` source offsets total in one query
+- each partition still commits its own next offset independently
+
 ## Predicate Rules In Committed-Read Mode
 
 Committed-read mode preserves Kafka-like consumer-group resume semantics by
@@ -142,6 +166,8 @@ Optional rewind extension:
 
 - session `committed_read_allow_offset_rewind = true` allows explicit
   `_partition_offset` lower bounds in committed-read mode
+- session `committed_read_max_rows_per_partition` still applies after the
+  explicit rewind start is chosen
 - this applies to `_partition_offset` only in this iteration; `_timestamp`
   lower bounds remain rejected
 - explicit offset windows become authoritative for planning, even when
@@ -155,7 +181,12 @@ Optional rewind extension:
 Operational consequence:
 
 - fully consumed rewind-enabled reads may move the stored Kafka group offset
-  backward to the end of the explicit window
+  backward only to the end of the fully consumed capped window
+- subsequent plain committed-read queries resume from that rebased offset
+- rerunning the same rewind query may rewind again, because the explicit lower
+  bound remains authoritative for that query
+- `_partition_offset` is partition-local; rewind predicates apply to every
+  selected partition unless `_partition_id` narrows the scope
 - same-group concurrent queries remain unsafe and last-writer-wins, including
   backward offset movement
 - the existing repeated-scan guard and the `retry_policy=NONE` requirement
@@ -181,6 +212,8 @@ Supported values:
 - the split exists only to persist the resolved initial position
 - the committed checkpoint target is clamped into the current broker snapshot
   `[logStart, logEnd]`
+- the per-partition batch cap does not affect this checkpoint-only
+  initialization path
 - if pushed-down upper bounds fall below retained data, Trino persists the
   clamped empty-range checkpoint rather than the raw filtered end offset
 

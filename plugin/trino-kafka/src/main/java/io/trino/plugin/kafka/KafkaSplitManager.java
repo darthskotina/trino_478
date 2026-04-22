@@ -88,6 +88,7 @@ public class KafkaSplitManager
         KafkaTableHandle kafkaTableHandle = (KafkaTableHandle) table;
         boolean committedReadMode = KafkaSessionProperties.isCommittedReadEnabled(session);
         boolean allowCommittedReadOffsetRewind = committedReadMode && KafkaSessionProperties.isCommittedReadAllowOffsetRewind(session);
+        long committedReadMaxRowsPerPartition = KafkaSessionProperties.getCommittedReadMaxRowsPerPartition(session);
         Optional<String> committedReadGroupId = committedReadMode ? Optional.of(KafkaSessionProperties.getRequiredCommittedReadGroupId(session)) : Optional.empty();
 
         committedReadGroupId.ifPresent(groupId -> committedReadRegistry.register(session.getQueryId(), groupId, kafkaTableHandle.topicName()));
@@ -140,6 +141,7 @@ public class KafkaSplitManager
                         partitionLogEndOffsets.get(topicPartition),
                         explicitPartitionOffsetLowerBound.map(offset -> max(partitionLogStartOffsets.get(topicPartition), offset)).orElse(partitionBeginOffsets.get(topicPartition)),
                         partitionEndOffsets.get(topicPartition),
+                        committedReadMaxRowsPerPartition,
                         allowCommittedReadOffsetRewind,
                         explicitPartitionOffsetLowerBound.isPresent(),
                         committedReadGroupId.orElseThrow(),
@@ -214,6 +216,7 @@ public class KafkaSplitManager
             long logEnd,
             long filteredBegin,
             long filteredEnd,
+            long maxRowsPerPartition,
             boolean allowOffsetRewind,
             boolean explicitOffsetLowerBound,
             String groupId,
@@ -222,15 +225,16 @@ public class KafkaSplitManager
         CommittedOffsetResolution resolution = resolveCommittedOffset(tableHandle, topicPartition, logStart, logEnd, groupId, committedOffsetMetadata);
         boolean explicitRewind = allowOffsetRewind && explicitOffsetLowerBound;
         long start = explicitRewind ? filteredBegin : min(filteredEnd, resolution.committedBase());
-        long end = filteredEnd;
+        long uncappedEnd = filteredEnd;
 
-        if (start < end) {
+        if (start < uncappedEnd) {
+            long end = maxRowsPerPartition > 0 ? min(uncappedEnd, saturatedAdd(start, maxRowsPerPartition)) : uncappedEnd;
             return new SplitPlanningResult(Optional.of(new SplitRangeAndMetadata(
                     new Range(start, end),
                     new KafkaCommittedReadSplitMetadata(groupId, false, end))));
         }
         if (!explicitRewind && resolution.missingOrInvalid() && resolution.appliedPolicy().orElse(null) == KafkaCommittedReadMissingOffsetPolicy.LATEST) {
-            long checkpointTarget = clampCheckpointTarget(logStart, logEnd, filteredEnd);
+            long checkpointTarget = clampCheckpointTarget(logStart, logEnd, uncappedEnd);
             return new SplitPlanningResult(Optional.of(new SplitRangeAndMetadata(
                     new Range(checkpointTarget, checkpointTarget),
                     new KafkaCommittedReadSplitMetadata(groupId, true, checkpointTarget))));
@@ -290,6 +294,17 @@ public class KafkaSplitManager
     private long clampCheckpointTarget(long logStart, long logEnd, long filteredEnd)
     {
         return min(logEnd, max(logStart, filteredEnd));
+    }
+
+    private long saturatedAdd(long left, long right)
+    {
+        if (right > 0 && left > Long.MAX_VALUE - right) {
+            return Long.MAX_VALUE;
+        }
+        if (right < 0 && left < Long.MIN_VALUE - right) {
+            return Long.MIN_VALUE;
+        }
+        return left + right;
     }
 
     private record CommittedOffsetResolution(long committedBase, boolean missingOrInvalid, Optional<KafkaCommittedReadMissingOffsetPolicy> appliedPolicy)
