@@ -1,10 +1,7 @@
 # Kafka Connector Operator Notes
 
-This README documents the branch-specific committed-read behavior intended for
-this modified Kafka connector. It complements the upstream connector reference
-in [docs/src/main/sphinx/connector/kafka.md](../../docs/src/main/sphinx/connector/kafka.md)
-and is meant to capture the operational contract and caveats of the
-consumer-group offset commit feature.
+This README is the single source of truth for Kafka-related functionality
+introduced or changed on this branch relative to `main`.
 
 ## Modes
 
@@ -55,17 +52,25 @@ Compatibility rules:
 - `committed_read_group_id` is a new session property used only when
   committed-read mode is enabled
 
-## Effective Group ID
+## Effective Settings
 
-Committed-read mode resolves the effective group ID as follows:
+Committed-read mode resolution:
+
+1. session `committed_read_enabled`, if set
+2. otherwise catalog `kafka.committed-read-enabled`
+
+Committed-read group ID resolution:
 
 1. session `committed_read_group_id`, if set
 2. otherwise fail the query
 
 Rules:
 
+- committed-read mode can be enabled either by catalog default or by session
+  override
 - committed-read mode requires an explicit session group ID
 - blank group IDs are invalid
+- `kafka.consumer-group-id` is not a committed-read fallback
 - one query has one effective committed-read group ID across all Kafka scans in
   that session
 - separate sessions may use different committed-read group IDs concurrently in
@@ -206,6 +211,10 @@ Supported values:
 - `LATEST`
 - `ERROR`
 
+Default:
+
+- `ERROR`
+
 `LATEST` may produce a checkpoint-only split:
 
 - the split emits no rows
@@ -216,6 +225,67 @@ Supported values:
   initialization path
 - if pushed-down upper bounds fall below retained data, Trino persists the
   clamped empty-range checkpoint rather than the raw filtered end offset
+
+## Offset Metadata Table Function
+
+This branch also adds the `system.offsets` table function for Kafka.
+
+Use it to inspect current broker offset bounds for a connector-visible Kafka
+table without scanning topic rows:
+
+```sql
+SELECT partition_id, log_start_offset, log_end_offset, last_readable_offset
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'))
+ORDER BY partition_id;
+```
+
+Arguments:
+
+- `schema_name`: schema of the Kafka table exposed through Trino
+- `table_name`: table name exposed through Trino
+- `partition => <bigint>`: optional; narrows the lookup to one partition
+
+Important argument rule:
+
+- `schema_name` and `table_name` refer to the connector-visible table, not an
+  arbitrary broker topic name
+- if a Kafka table is exposed under an alias, call the function with that alias
+
+Output columns:
+
+- `partition_id`: Kafka partition ID
+- `log_start_offset`: current broker beginning offset
+- `log_end_offset`: current broker end offset
+- `last_readable_offset`: `log_end_offset - 1` for a non-empty partition, or
+  `NULL` when `log_start_offset = log_end_offset`
+
+Properties:
+
+- the result is a point-in-time metadata snapshot
+- values can change immediately after lookup
+- the function is metadata-only
+- it calls Kafka metadata APIs such as `partitionsFor`, `beginningOffsets`,
+  and `endOffsets`
+- it does not read topic rows
+- it does not decode Kafka messages
+- runtime cost scales primarily with partition count, not message volume
+
+Examples:
+
+```sql
+SELECT partition_id, log_start_offset, log_end_offset, last_readable_offset
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders', partition => 2));
+```
+
+```sql
+SELECT
+    min(log_start_offset) AS topic_min_log_start_offset,
+    max(log_end_offset) AS topic_max_log_end_offset
+FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
+```
+
+The function returns one row per partition. Add `ORDER BY` if deterministic
+output ordering matters.
 
 ## Concurrency And Safety
 
@@ -285,8 +355,5 @@ Use default mode for:
 
 ## README Scope
 
-This README is the operator-facing contract for the modified Kafka connector.
-When implementation changes, keep this file aligned with:
-
-- `docs/src/main/sphinx/connector/kafka.md`
-- `KAFKA_CONSUMER_GROUP_OFFSET_COMMIT_PLAN.md`
+This README is the operator-facing contract for Kafka functionality changed on
+this branch. When Kafka implementation changes, update this file first.

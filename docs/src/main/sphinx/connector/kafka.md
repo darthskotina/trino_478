@@ -151,21 +151,6 @@ or `timestamp_upper_bound_force_push_down_enabled` session property.
 
 This property is optional; the default is `false`.
 
-## Committed-read session properties
-
-This branch also adds committed-read session properties that are documented in
-[plugin/trino-kafka/README.md](../../plugin/trino-kafka/README.md), including:
-
-- `committed_read_enabled`
-- `committed_read_group_id`
-- `committed_read_allow_offset_rewind`
-- `committed_read_max_rows_per_partition`
-
-`committed_read_max_rows_per_partition` limits committed-read split planning per
-selected Kafka partition. `0` means unlimited. The cap applies only in
-committed-read mode and does not change default-mode `kafka.messages-per-split`
-planning.
-
 ### `kafka.hide-internal-columns`
 
 In addition to the data columns defined in a table description file, the
@@ -261,64 +246,6 @@ For each defined table, the connector maintains the following columns:
 
 For tables without a table definition file, the `_key_corrupt` and
 `_message_corrupt` columns will always be `false`.
-
-## Offset metadata table function
-
-Use the `system.offsets` table function to inspect the current broker offset
-bounds for a connector-visible Kafka table without scanning topic rows:
-
-```sql
-SELECT partition_id, log_start_offset, log_end_offset, last_readable_offset
-FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'))
-ORDER BY partition_id;
-```
-
-The `schema_name` and `table_name` arguments identify the Kafka table exposed
-through the connector, not an arbitrary broker topic name. If a Kafka table is
-published under an alias, call the function with the alias and Trino resolves
-it to the mapped topic before fetching broker metadata.
-
-Optional arguments:
-
-- `partition => <bigint>` narrows the lookup to one partition
-
-Output columns:
-
-- `partition_id`: Kafka partition ID
-- `log_start_offset`: current broker beginning offset for the partition
-- `log_end_offset`: current broker end offset for the partition
-- `last_readable_offset`: `log_end_offset - 1` for a non-empty partition, or
-  `NULL` when `log_start_offset = log_end_offset`
-
-The result is a point-in-time metadata snapshot under the connector's effective
-Kafka client configuration. Values can change immediately after lookup.
-
-This function is metadata-only:
-
-- it calls Kafka metadata APIs such as `partitionsFor`, `beginningOffsets`,
-  and `endOffsets`
-- it does not read topic records
-- it does not decode Kafka messages
-- runtime cost scales primarily with partition count, not message volume
-
-Inspect one partition directly:
-
-```sql
-SELECT partition_id, log_start_offset, log_end_offset, last_readable_offset
-FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders', partition => 2));
-```
-
-Derive a topic-level summary with SQL aggregation:
-
-```sql
-SELECT
-    min(log_start_offset) AS topic_min_log_start_offset,
-    max(log_end_offset) AS topic_max_log_end_offset
-FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'));
-```
-
-The function returns one row per partition. If you need deterministic output
-ordering, add an explicit `ORDER BY`.
 
 (kafka-table-schema-registry)=
 ## Table schema and schema registry usage
