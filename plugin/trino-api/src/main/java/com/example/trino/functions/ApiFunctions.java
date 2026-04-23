@@ -14,13 +14,18 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 public class ApiFunctions {
+    static final long DEFAULT_CONNECT_TIMEOUT_SECONDS = 20;
+    static final long DEFAULT_REQUEST_TIMEOUT_SECONDS = 300;
+
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Description("Calls a REST API with optional auth, method, headers, body; returns response as string")
@@ -35,7 +40,24 @@ public class ApiFunctions {
             @SqlType(StandardTypes.VARCHAR) Slice headersJson,
             @SqlType(StandardTypes.VARCHAR) Slice requestBody
     ) {
-        return callApi(apiUrl, usernameOrToken, password, authType, method, headersJson, requestBody, false);
+        return callApiInternal(apiUrl, usernameOrToken, password, authType, method, headersJson, requestBody, false, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS);
+    }
+
+    @Description("Calls a REST API with optional auth, method, headers, body, and timeout overrides; returns response as string")
+    @ScalarFunction(value = "call_api", deterministic = false)
+    @SqlType(StandardTypes.VARCHAR)
+    public static Slice callApi(
+            @SqlType(StandardTypes.VARCHAR) Slice apiUrl,
+            @SqlType(StandardTypes.VARCHAR) Slice usernameOrToken,
+            @SqlType(StandardTypes.VARCHAR) Slice password,
+            @SqlType(StandardTypes.VARCHAR) Slice authType,
+            @SqlType(StandardTypes.VARCHAR) Slice method,
+            @SqlType(StandardTypes.VARCHAR) Slice headersJson,
+            @SqlType(StandardTypes.VARCHAR) Slice requestBody,
+            @SqlType(StandardTypes.BIGINT) long connectTimeoutSeconds,
+            @SqlType(StandardTypes.BIGINT) long requestTimeoutSeconds
+    ) {
+        return callApiInternal(apiUrl, usernameOrToken, password, authType, method, headersJson, requestBody, false, connectTimeoutSeconds, requestTimeoutSeconds);
     }
 
     @Description("Calls a REST API; if return_meta is true, returns JSON with status, headers, cookies, body; otherwise returns response body")
@@ -51,15 +73,50 @@ public class ApiFunctions {
             @SqlType(StandardTypes.VARCHAR) Slice requestBody,
             @SqlType(StandardTypes.BOOLEAN) boolean returnMeta
     ) {
+        return callApiInternal(apiUrl, usernameOrToken, password, authType, method, headersJson, requestBody, returnMeta, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_REQUEST_TIMEOUT_SECONDS);
+    }
+
+    @Description("Calls a REST API with timeout overrides; if return_meta is true, returns JSON with status, headers, cookies, body; otherwise returns response body")
+    @ScalarFunction(value = "call_api", deterministic = false)
+    @SqlType(StandardTypes.VARCHAR)
+    public static Slice callApi(
+            @SqlType(StandardTypes.VARCHAR) Slice apiUrl,
+            @SqlType(StandardTypes.VARCHAR) Slice usernameOrToken,
+            @SqlType(StandardTypes.VARCHAR) Slice password,
+            @SqlType(StandardTypes.VARCHAR) Slice authType,
+            @SqlType(StandardTypes.VARCHAR) Slice method,
+            @SqlType(StandardTypes.VARCHAR) Slice headersJson,
+            @SqlType(StandardTypes.VARCHAR) Slice requestBody,
+            @SqlType(StandardTypes.BOOLEAN) boolean returnMeta,
+            @SqlType(StandardTypes.BIGINT) long connectTimeoutSeconds,
+            @SqlType(StandardTypes.BIGINT) long requestTimeoutSeconds
+    ) {
+        return callApiInternal(apiUrl, usernameOrToken, password, authType, method, headersJson, requestBody, returnMeta, connectTimeoutSeconds, requestTimeoutSeconds);
+    }
+
+    private static Slice callApiInternal(
+            Slice apiUrl,
+            Slice usernameOrToken,
+            Slice password,
+            Slice authType,
+            Slice method,
+            Slice headersJson,
+            Slice requestBody,
+            boolean returnMeta,
+            long connectTimeoutSeconds,
+            long requestTimeoutSeconds
+    ) {
         String urlString = apiUrl.toStringUtf8();
         String user = usernameOrToken.toStringUtf8();
         String pass = password.toStringUtf8();
         String auth = authType.toStringUtf8();
-        String httpMethod = method.toStringUtf8().toUpperCase();
+        String httpMethod = method.toStringUtf8().toUpperCase(Locale.ROOT);
         String headersRaw = headersJson.toStringUtf8();
         String bodyContent = requestBody.toStringUtf8();
 
         try {
+            Duration connectTimeout = validateTimeout("connect_timeout_seconds", connectTimeoutSeconds);
+            Duration requestTimeout = validateTimeout("request_timeout_seconds", requestTimeoutSeconds);
             Response response = executeRequest(
                     urlString,
                     user,
@@ -67,7 +124,9 @@ public class ApiFunctions {
                     auth,
                     httpMethod,
                     headersRaw,
-                    bodyContent
+                    bodyContent,
+                    connectTimeout,
+                    requestTimeout
             );
 
             String result;
@@ -96,9 +155,12 @@ public class ApiFunctions {
             String auth,
             String httpMethod,
             String headersRaw,
-            String bodyContent
+            String bodyContent,
+            Duration connectTimeout,
+            Duration requestTimeout
     ) throws Exception {
         HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(connectTimeout)
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
 
@@ -106,6 +168,7 @@ public class ApiFunctions {
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(urlString))
+                .timeout(requestTimeout)
                 .method(httpMethod, bodyPublisher);
 
         // Authorization
@@ -145,6 +208,7 @@ public class ApiFunctions {
         boolean shouldSendBody = switch (httpMethod) {
             case "POST", "PUT" -> true;
             case "GET", "PATCH", "DELETE" -> !bodyContent.isEmpty();
+            case "HEAD", "OPTIONS" -> false;
             default -> false;
         };
 
@@ -152,6 +216,14 @@ public class ApiFunctions {
             return HttpRequest.BodyPublishers.noBody();
         }
         return HttpRequest.BodyPublishers.ofString(bodyContent, StandardCharsets.UTF_8);
+    }
+
+    private static Duration validateTimeout(String parameterName, long timeoutSeconds)
+    {
+        if (timeoutSeconds <= 0) {
+            throw new IllegalArgumentException(parameterName + " must be greater than 0");
+        }
+        return Duration.ofSeconds(timeoutSeconds);
     }
 
     private static class Response {

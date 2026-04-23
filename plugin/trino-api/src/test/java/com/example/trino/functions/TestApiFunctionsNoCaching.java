@@ -78,7 +78,7 @@ public class TestApiFunctionsNoCaching
                 .filter(method -> method.getName().equals("callApi"))
                 .toArray(Method[]::new);
 
-        assertEquals(2, methods.length);
+        assertEquals(4, methods.length);
         for (Method method : methods) {
             ScalarFunction annotation = method.getAnnotation(ScalarFunction.class);
             assertFalse(annotation.deterministic(), method + " must be non-deterministic");
