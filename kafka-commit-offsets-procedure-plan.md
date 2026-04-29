@@ -20,17 +20,120 @@ The procedure exists because in the operator's Kafka deployment, manual-assign `
 - **Procedure name:** `kafka.system.commit_offsets`.
 - **Argument shape:** both single-partition form and multi-partition map form supported in one signature; reject if neither or both are supplied.
 - **Schema/table strictness:** the procedure resolves `(schema_name, table_name)` through the connector's `TableDescriptionSupplier`. Topic-only or arbitrary-topic-name calls are rejected.
-- **Group ID resolution for the procedure:** explicit `group_id` argument wins; falls back to the renamed session property `consumer_group_id`; if both absent, fail.
+- **Group ID resolution for the procedure:** explicit `group_id` argument wins; falls back to the renamed session property `consumer_group_id`; if both absent, fail. **The procedure must succeed even when `committed_read_enabled=true` and the session property is unset, as long as the explicit `group_id` argument is provided.**
 - **Session property rename:** `committed_read_group_id` → `consumer_group_id`. Hard rename, no deprecated alias.
 - **Default-mode read path uses the renamed property:** if `consumer_group_id` session property is set, default-mode reads use it as the consumer `group.id`; otherwise they fall back to the legacy catalog `kafka.consumer-group-id`.
-- **Committed-read mode requires `consumer_group_id`** under the new name; failure mode is unchanged from today.
+- **Committed-read mode requires `consumer_group_id`** under the new name when the read path itself runs; failure mode is unchanged from today. The procedure is exempt — it has its own group-ID resolution.
 - **Validation:** validate every requested offset against `[logStart, logEnd]` (inclusive on both ends, since `logEnd` legitimately means "caught up"); allow override via `allow_out_of_range BOOLEAN DEFAULT false`.
 - **Partition-ownership convergence:** fail fast if `subscribe(topic) + poll` does not assign all requested partitions; one bounded retry (single rejoin) before failing; total wait timeout is a code-level constant.
 - **Concurrency safety:** no in-Trino registry; document last-writer-wins.
 - **Access control:** require both `checkCanExecuteProcedure(...)` and `checkCanSelectFromColumns(...)`.
-- **Identity:** procedure consumer reuses connector SSL/TLS and bootstrap configuration via a new `KafkaConsumerFactory.configureForGroup(...)` method.
+- **Identity:** procedure consumer reuses connector SSL/TLS and bootstrap configuration via new methods on `KafkaConsumerFactory`.
+- **Subscribe-mode commit mechanics:** after `subscribe(topic)` and the join-driving `poll(...)`, the procedure pauses all assigned partitions before issuing `commitSync(...)`. The procedure does **not** override `auto.offset.reset`; the Kafka client default applies. This avoids `NoOffsetForPartitionException` on first-time commits and on partitions with no group history.
 
 ## Implementation Steps
+
+### 0. Refactor `KafkaConsumerFactory` and `KafkaOffsetBoundsService` to separate base properties from session-group resolution
+
+This step is a prerequisite for everything that follows. Without it, the procedure cannot run when `committed_read_enabled=true` and the session group is unset (today, `DefaultKafkaConsumerFactory.configure(session)` throws `INVALID_SESSION_PROPERTY` in that case via `getEffectiveConsumerGroupId(session)`), and `KafkaOffsetBoundsService.getTopicPartitionOffsets(...)` inherits the same problem because it builds its consumer via `consumerFactory.create(session)`.
+
+The refactor isolates the session-group lookup into a single explicit code path used only by the read pipeline. Metadata-only calls and the new procedure are routed through paths that take the group ID as a parameter (or do not need one).
+
+**File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaConsumerFactory.java`
+
+Replace the existing single-method interface with:
+
+```java
+public interface KafkaConsumerFactory
+{
+    /**
+     * Build the connection-level Kafka client properties. Does NOT set group.id.
+     * Does NOT consult any session group-ID property. Safe to call from metadata
+     * paths and from the commit_offsets procedure regardless of committed-read state.
+     */
+    Properties baseProperties(ConnectorSession session);
+
+    /**
+     * Build properties for the read pipeline. Resolves the effective group ID
+     * by consulting session properties; throws INVALID_SESSION_PROPERTY when
+     * committed-read mode is enabled but no group ID is supplied.
+     */
+    default Properties configure(ConnectorSession session)
+    {
+        Properties properties = baseProperties(session);
+        properties.setProperty(GROUP_ID_CONFIG, resolveReadPathGroupId(session));
+        return properties;
+    }
+
+    /**
+     * Build properties for an explicit group ID. Bypasses session-group
+     * resolution entirely. Used by the commit_offsets procedure.
+     */
+    default Properties configureForGroup(ConnectorSession session, String groupId)
+    {
+        requireNonNull(groupId, "groupId is null");
+        Properties properties = baseProperties(session);
+        properties.setProperty(GROUP_ID_CONFIG, groupId);
+        return properties;
+    }
+
+    /**
+     * Build properties for metadata-only operations that do not exercise group
+     * membership (e.g. partitionsFor, beginningOffsets, endOffsets). Sets a
+     * stable but unused group.id placeholder so that the Kafka client does not
+     * complain; never used for commit or fetch.
+     */
+    default Properties configureForMetadata(ConnectorSession session)
+    {
+        Properties properties = baseProperties(session);
+        properties.setProperty(GROUP_ID_CONFIG, METADATA_GROUP_ID_PLACEHOLDER);
+        return properties;
+    }
+
+    String resolveReadPathGroupId(ConnectorSession session);
+
+    default KafkaConsumer<byte[], byte[]> create(ConnectorSession session)
+    {
+        return new KafkaConsumer<>(configure(session));
+    }
+
+    default KafkaConsumer<byte[], byte[]> createForGroup(ConnectorSession session, String groupId)
+    {
+        return new KafkaConsumer<>(configureForGroup(session, groupId));
+    }
+
+    default KafkaConsumer<byte[], byte[]> createForMetadata(ConnectorSession session)
+    {
+        return new KafkaConsumer<>(configureForMetadata(session));
+    }
+
+    String METADATA_GROUP_ID_PLACEHOLDER = "trino-kafka-metadata";
+}
+```
+
+Note: `METADATA_GROUP_ID_PLACEHOLDER` is a fixed string; metadata calls (`partitionsFor`, `beginningOffsets`, `endOffsets`) do not exercise the group coordinator at the broker level, so the placeholder value is never durable on the broker.
+
+**File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/DefaultKafkaConsumerFactory.java`
+
+- Replace `configure(ConnectorSession)` with an implementation of `baseProperties(ConnectorSession)` that contains everything the current `configure` does **except** `GROUP_ID_CONFIG`.
+- Implement `resolveReadPathGroupId(ConnectorSession)` with the new resolution order:
+  1. If `KafkaSessionProperties.isCommittedReadEnabled(session)`, return `KafkaSessionProperties.getRequiredCommittedReadGroupId(session)` (unchanged behavior — committed-read mode still requires the property).
+  2. Else if `KafkaSessionProperties.getConsumerGroupIdSessionProperty(session)` is present, return its value.
+  3. Else return the legacy catalog `consumerGroupId` (`kafka.consumer-group-id`).
+
+The interface's default `configure` method then composes `baseProperties` + `resolveReadPathGroupId` and preserves the existing read-path semantics. Custom `KafkaConsumerFactory` implementations that override `configure(...)` directly should be updated to override `baseProperties(...)` and `resolveReadPathGroupId(...)` instead. Search the codebase for any other implementations of `KafkaConsumerFactory` (currently only `DefaultKafkaConsumerFactory`) and update them.
+
+**File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaOffsetBoundsService.java`
+
+- Change `getTopicPartitionOffsets(session, ...)` to use `consumerFactory.createForMetadata(session)` instead of `consumerFactory.create(session)`. This makes the metadata path independent of committed-read session state.
+- This means the existing `system.offsets` PTF will also now work correctly when committed-read mode is enabled and no session group is set. That is a strict improvement; document it in the README's `system.offsets` section if not already covered.
+
+**File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaSplitManager.java`
+
+- The `getCommittedOffsets(session, groupId)` method uses `Admin`, not the consumer factory; it is unaffected.
+- All other call sites of `consumerFactory.create(session)` are read-path uses and remain on the original method.
+
+**Acceptance for step 0:** all existing tests still pass after this refactor alone, before any procedure code is added. This includes `TestKafkaCommittedReadMode`, default-mode tests, and `TestKafkaIntegration*`.
 
 ### 1. Rename session property `committed_read_group_id` → `consumer_group_id`
 
@@ -39,9 +142,9 @@ The procedure exists because in the operator's Kafka deployment, manual-assign `
 - Rename the `COMMITTED_READ_GROUP_ID` constant to `CONSUMER_GROUP_ID` and its string value from `"committed_read_group_id"` to `"consumer_group_id"`.
 - Rename the public accessor methods:
   - `getCommittedReadGroupId(ConnectorSession)` → `getConsumerGroupIdSessionProperty(ConnectorSession)` (returns `Optional<String>`).
-  - `getRequiredCommittedReadGroupId(ConnectorSession)` → `getRequiredCommittedReadGroupId(ConnectorSession)` retained in name only as a wrapper that calls the new getter and throws `INVALID_SESSION_PROPERTY` if absent. Update its error message to reference the new property name.
+  - `getRequiredCommittedReadGroupId(ConnectorSession)` is retained in name as a thin wrapper that calls the new getter and throws `INVALID_SESSION_PROPERTY` if absent. Update its error message to reference the new property name (`consumer_group_id`).
 - Update the property description to: `"Kafka consumer group ID; required by committed-read mode and overrides the legacy default-mode group ID when set"`.
-- Update the blank-value validation message to use the new name.
+- Update the blank-value validation message to use the new property name.
 
 **Files that call the renamed accessors (update call sites):**
 
@@ -50,47 +153,15 @@ The procedure exists because in the operator's Kafka deployment, manual-assign `
 
 ### 2. Broaden `consumer_group_id` to default-mode reads
 
-**File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/DefaultKafkaConsumerFactory.java`
+This is realized by `DefaultKafkaConsumerFactory.resolveReadPathGroupId(...)` from step 0. No additional change is needed beyond verifying that:
 
-Replace `getEffectiveConsumerGroupId(ConnectorSession)` resolution with:
+- A default-mode SELECT with `SET SESSION consumer_group_id = 'foo'` produces a consumer configured with `group.id = foo` (verified by unit test in §9.1).
+- A default-mode SELECT with no session override still produces a consumer with `group.id = bigdata-spark-streaming` (or whatever the catalog `kafka.consumer-group-id` resolves to).
+- A committed-read SELECT continues to require the session property and fail otherwise.
 
-1. If `KafkaSessionProperties.isCommittedReadEnabled(session)` is true, return `KafkaSessionProperties.getRequiredCommittedReadGroupId(session)` (unchanged behavior — committed-read mode still requires the property to be set).
-2. Otherwise, if `KafkaSessionProperties.getConsumerGroupIdSessionProperty(session)` is present, return it.
-3. Otherwise, return the legacy catalog `consumerGroupId` (`kafka.consumer-group-id`).
+### 3. (Removed — folded into Step 0)
 
-This is a behavioral change for default-mode reads: a session-set `consumer_group_id` will now flow into the consumer's `group.id`. The change is intentional and is documented in the README update (step 8).
-
-### 3. Add a group-ID override path on `KafkaConsumerFactory`
-
-**Files:**
-- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaConsumerFactory.java`
-- `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/DefaultKafkaConsumerFactory.java`
-
-Add a default method on the interface:
-
-```java
-default Properties configureForGroup(ConnectorSession session, String groupId)
-{
-    Properties properties = configure(session);
-    properties.setProperty(GROUP_ID_CONFIG, groupId);
-    return properties;
-}
-```
-
-The default implementation delegates to `configure(session)` and overrides the `group.id`. This keeps SSL/TLS, bootstrap servers, deserializers, buffer size, `enable.auto.commit=false`, and resource-file overrides flowing through the existing path. Custom `KafkaConsumerFactory` implementations (if any) inherit the override behavior automatically.
-
-Add a sibling default method that lets callers opt out of consumer subscription via `auto.offset.reset=none` for the procedure case:
-
-```java
-default Properties configureForOffsetCommit(ConnectorSession session, String groupId)
-{
-    Properties properties = configureForGroup(session, groupId);
-    properties.setProperty(AUTO_OFFSET_RESET_CONFIG, "none");
-    return properties;
-}
-```
-
-`session.timeout.ms`, `heartbeat.interval.ms`, `partition.assignment.strategy`, `client.id`, and `group.instance.id` are intentionally left at Kafka client defaults.
+The procedure-specific factory method previously described here is now `configureForGroup(ConnectorSession, String)` from step 0. The procedure does **not** override `auto.offset.reset`; the Kafka client default (`latest`) applies. The procedure also does not set `client.id` or `group.instance.id`. `session.timeout.ms`, `heartbeat.interval.ms`, and `partition.assignment.strategy` are left at Kafka client defaults.
 
 ### 4. Add the offset-bounds validation helper
 
@@ -107,7 +178,7 @@ public Map<TopicPartition, OffsetBounds> getPartitionBounds(
 public record OffsetBounds(long logStart, long logEnd) {}
 ```
 
-This delegates to `getTopicPartitionOffsets(session, topicName, Optional.empty())` and returns a map keyed by partition for the requested partition set. If any requested partition does not exist in the topic's partition list, the method throws `TrinoException(KAFKA_SPLIT_ERROR, ...)` with a clear "Partition X does not exist for topic 'Y'" message.
+This delegates to the `getTopicPartitionOffsets(session, topicName, Optional.empty())` path (now metadata-safe per step 0) and returns a map keyed by partition for the requested partition set. If any requested partition does not exist in the topic's partition list, the method throws `TrinoException(KAFKA_SPLIT_ERROR, ...)` with a clear "Partition X does not exist for topic 'Y'" message.
 
 This method is the only Kafka-side I/O performed by the validation path. Its cost is bounded by:
 - one `Metadata` RPC (`partitionsFor`),
@@ -120,7 +191,9 @@ It does not scan messages.
 
 **New file:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/procedure/CommitOffsetsProcedure.java`
 
-Pattern: model on `plugin/trino-iceberg/src/main/java/io/trino/plugin/iceberg/procedure/RollbackToSnapshotProcedure.java`. Skeleton:
+Pattern: model on `plugin/trino-iceberg/src/main/java/io/trino/plugin/iceberg/procedure/RollbackToSnapshotProcedure.java`. The implementing agent must inject `TypeManager` to construct the `MapType` for the `OFFSETS` argument, since `Procedure.Argument` requires a concrete `Type`.
+
+Skeleton:
 
 ```java
 public class CommitOffsetsProcedure
@@ -142,17 +215,25 @@ public class CommitOffsetsProcedure
                         String.class,   // group_id (nullable)
                         Long.class,     // partition (nullable)
                         Long.class,     // offset (nullable)
-                        SqlMap.class,   // offsets (nullable, map<int, bigint>)
+                        SqlMap.class,   // offsets (nullable)
                         Boolean.class));// allow_out_of_range (nullable)
     }
 
     private final KafkaConsumerFactory consumerFactory;
     private final KafkaOffsetBoundsService offsetBoundsService;
+    private final MapType offsetsArgumentType;
 
     @Inject
     public CommitOffsetsProcedure(
             KafkaConsumerFactory consumerFactory,
-            KafkaOffsetBoundsService offsetBoundsService) { ... }
+            KafkaOffsetBoundsService offsetBoundsService,
+            TypeManager typeManager)
+    {
+        this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
+        this.offsetBoundsService = requireNonNull(offsetBoundsService, "offsetBoundsService is null");
+        this.offsetsArgumentType = (MapType) typeManager.getType(
+                mapType(INTEGER.getTypeSignature(), BIGINT.getTypeSignature()));
+    }
 
     @Override
     public Procedure get()
@@ -166,7 +247,7 @@ public class CommitOffsetsProcedure
                         new Procedure.Argument("GROUP_ID", VARCHAR, false, null),
                         new Procedure.Argument("PARTITION", BIGINT, false, null),
                         new Procedure.Argument("OFFSET", BIGINT, false, null),
-                        new Procedure.Argument("OFFSETS", mapType(INTEGER, BIGINT), false, null),
+                        new Procedure.Argument("OFFSETS", offsetsArgumentType, false, null),
                         new Procedure.Argument("ALLOW_OUT_OF_RANGE", BOOLEAN, false, false)),
                 COMMIT_OFFSETS.bindTo(this));
     }
@@ -174,6 +255,10 @@ public class CommitOffsetsProcedure
     public void commitOffsets(...) { ... }
 }
 ```
+
+Notes for the implementing agent:
+- The `Procedure.Argument` constructor used here is `(name, type, required, defaultValue)`. The literal types of the default values must match the argument type (`null` for nullable types; `false` `Boolean` for `BOOLEAN`). Verify against the actual `io.trino.spi.procedure.Procedure.Argument` constructors before writing tests; if the SPI exposes a different overload shape, adapt the call sites accordingly. The key point is that all five trailing arguments are declared optional with no required `null` defaults forced by the user.
+- `mapType(INTEGER.getTypeSignature(), BIGINT.getTypeSignature())` returns a `TypeSignature` (from `io.trino.spi.type.TypeSignature`). Use the `TypeManager` to materialize it.
 
 **Body of `commitOffsets(...)`** — execute in this order, all inside a `ThreadContextClassLoader`:
 
@@ -189,7 +274,7 @@ public class CommitOffsetsProcedure
 
 2. **Resolve the topic via the table description supplier.**
    - Construct `SchemaTableName(schemaName, tableName)`.
-   - Call `offsetBoundsService.getTopicDescription(session, schemaTableName)`; throw `TableNotFoundException(schemaTableName)` if absent. (Same path as `OffsetBoundsTableFunction.analyze`.)
+   - Call `offsetBoundsService.getTopicDescription(session, schemaTableName)`; throw `TableNotFoundException(schemaTableName)` if absent.
    - Extract `topicName` from the description.
 
 3. **Access control.**
@@ -199,27 +284,26 @@ public class CommitOffsetsProcedure
 4. **Bounds validation.**
    - Call `offsetBoundsService.getPartitionBounds(session, topicName, requested.keySet())`.
    - For every `(partition, offset)` in `requested`:
-     - If the partition is missing in the result, throw "Partition X does not exist for topic 'Y'".
+     - If the partition is missing in the result, propagate the "Partition X does not exist" error from the helper.
      - If `!allowOutOfRange` and `offset < bounds.logStart() || offset > bounds.logEnd()`, throw `TrinoException(INVALID_PROCEDURE_ARGUMENT, "Offset X for partition Y is outside the broker range [logStart, logEnd]; pass allow_out_of_range => true to override")`.
 
 5. **Open a short-lived subscribe-mode consumer.**
-   - Build properties via `consumerFactory.configureForOffsetCommit(session, groupId)`.
+   - Build properties via `consumerFactory.configureForGroup(session, groupId)`.
    - Construct `KafkaConsumer<byte[], byte[]>`.
 
-6. **Subscribe and converge on partition ownership.**
+6. **Subscribe and converge on partition ownership; pause; commit.**
    - `consumer.subscribe(Set.of(topicName))`.
    - Loop with deadline `now + MAX_WAIT_FOR_ASSIGNMENT`:
-     - `consumer.poll(POLL_TIMEOUT)` (the poll drives the join/sync; we discard returned records — they shouldn't appear because we never set a position, but if they do, we ignore them).
-     - If `consumer.assignment()` contains every requested partition (as `TopicPartition` instances on `topicName`), break.
-     - If `attempts < MAX_REJOIN_ATTEMPTS`, call `consumer.enforceRebalance()` once and continue polling; increment the attempt counter.
+     - `consumer.poll(POLL_TIMEOUT)` (the poll drives the join/sync; we discard returned records).
+     - If `consumer.assignment()` contains every requested partition (as `TopicPartition` instances on `topicName`), break the loop.
+     - If `attempts < MAX_REJOIN_ATTEMPTS` and we have not yet rejoined, call `consumer.enforceRebalance()` once and continue polling; increment the attempt counter.
      - If the deadline is exceeded, throw `TrinoException(KAFKA_SPLIT_ERROR, "Could not acquire partitions [missing] for group ID 'X' on topic 'Y' within Zs; another consumer is likely a member of the same group")`.
-
-7. **Commit.**
+   - **Immediately after assignment converges, call `consumer.pause(consumer.assignment())`.** This guarantees no subsequent `poll` triggers a fetch, eliminating any risk of `NoOffsetForPartitionException` for partitions with no committed offset for this group.
    - Build `Map<TopicPartition, OffsetAndMetadata>` from `requested`.
    - Call `consumer.commitSync(...)`.
    - On `KafkaException`, throw `TrinoException(KAFKA_SPLIT_ERROR, "Failed to commit Kafka offsets for group ID 'X' on topic 'Y'", e)`.
 
-8. **Cleanup.**
+7. **Cleanup.**
    - In a `finally`, call `consumer.unsubscribe()` and `consumer.close()`. Suppress and chain exceptions consistent with the pattern in `KafkaRecordSet.close()`.
 
 ### 6. Bind the procedure into Guice and expose it via `KafkaConnector`
@@ -235,21 +319,24 @@ import io.trino.spi.procedure.Procedure;
 newSetBinder(binder, Procedure.class).addBinding().toProvider(CommitOffsetsProcedure.class).in(Scopes.SINGLETON);
 ```
 
+The Multibinder must be created even if no procedures are bound, so that `Set<Procedure>` injection in `KafkaConnector` always succeeds.
+
 **File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaConnector.java`
 
 - Add `private final Set<Procedure> procedures;` field.
 - Inject `Set<Procedure> procedures` in the constructor; assign with `requireNonNull` and `ImmutableSet.copyOf`.
-- Override `Set<Procedure> getProcedures()` to return the field. (The default `Connector.getProcedures()` returns `ImmutableSet.of()`.)
+- Override `Set<Procedure> getProcedures()` to return the field.
 
 ### 7. Touch points and contract preservation
 
 Re-verify after editing:
 
-- `DefaultKafkaConsumerFactory.configure(session)` still sets `enable.auto.commit=false`, deserializers, bootstrap, buffer size, key/value deserializer, and resource-file overrides for both default and committed-read modes.
-- `KafkaSplitManager.getSplits(...)` still resolves the committed-read group ID via `KafkaSessionProperties.getRequiredCommittedReadGroupId(session)` after the rename.
+- `DefaultKafkaConsumerFactory.baseProperties(session)` still sets `enable.auto.commit=false`, deserializers, bootstrap, buffer size, key/value deserializer, and resource-file overrides — unchanged from the current `configure` body except that `GROUP_ID_CONFIG` is no longer set there.
+- `DefaultKafkaConsumerFactory.configure(session)` (composed default) preserves the previous read-path semantics for both default and committed-read modes.
+- `KafkaSplitManager.getSplits(...)` still resolves the committed-read group ID via `KafkaSessionProperties.getRequiredCommittedReadGroupId(session)` after the rename (read pipeline unchanged).
 - `KafkaCommittedReadRegistry.register(...)` still keys on the committed-read group ID and is unaffected by the rename.
 - `KafkaRecordSet.close()` still gates commit on the same five conditions and uses `commitSync` on the same assign-mode consumer.
-- `kafka.system.offsets` PTF (`OffsetBoundsFunction`) is unchanged.
+- `kafka.system.offsets` PTF (`OffsetBoundsFunction`) is unchanged at the call site; the underlying `getTopicPartitionOffsets` now uses the metadata-safe consumer path, which is a strict improvement.
 - `KafkaFilterManager.validateNormalReadScope(...)` is unchanged.
 
 ### 8. Documentation update
@@ -263,10 +350,15 @@ Add and update the following sections (alphabetize when reasonable, as per the p
 - **Modes — Default mode:** add a bullet noting that the default-mode consumer group ID is `kafka.consumer-group-id` unless overridden by the session property `consumer_group_id`.
 - **New section "Manual Offset Commit Procedure":**
   - Describe `kafka.system.commit_offsets` and its argument shapes (single-partition and map).
-  - Document group ID resolution: explicit argument wins, then session property, else fail.
+  - Document group ID resolution: explicit argument wins, then session property, else fail. Note explicitly that this is independent of `committed_read_enabled` and works even when no session group is set.
   - Document that the procedure uses subscribe-mode (joined-group) commit, not assign-mode commit, so broker ACL surface differs from default-mode reads.
-  - Document the same-group concurrency caveat: a concurrent member in the same group will starve the procedure of partition ownership; the procedure fails fast with a clear message.
+  - Document the same-group concurrency caveat: a concurrent member in the same group will starve the procedure of partition ownership; the procedure fails fast with a clear message after `MAX_WAIT_FOR_ASSIGNMENT`.
   - Document the validation policy: offsets are rejected outside `[logStart, logEnd]` unless `allow_out_of_range => true`.
+  - **New paragraph on `allow_out_of_range` interaction with `kafka.committed-read-missing-offset-policy`:**
+    - With policy `ERROR` (default): a subsequent committed-read query against this group fails until the offset is reset, because the broker still holds an out-of-range value.
+    - With policy `EARLIEST`: a subsequent committed-read query treats the out-of-range value as "no committed offset" and reads from `logStart`. The procedure-written value remains on the broker but is effectively ignored for planning.
+    - With policy `LATEST`: a subsequent committed-read query produces a checkpoint-only split that snaps the committed offset to `clamp(filteredEnd, [logStart, logEnd])`, **overwriting** the procedure-written value silently.
+    - Operator guidance: only use `allow_out_of_range => true` if you know your catalog policy and the next consumer's expectation. The procedure's value may not survive the next committed-read query.
   - Document idempotency: repeated calls with the same args produce the same broker state.
   - Provide three example calls: single-partition, multi-partition map, with `allow_out_of_range`.
 - **Cross-references:** update "Recommended Usage" to note that the procedure is the recommended pattern for environments where assign-mode `OffsetCommit` is denied. Update "Modes" to cross-reference the procedure.
@@ -276,6 +368,8 @@ Add and update the following sections (alphabetize when reasonable, as per the p
 ### 9. Testing
 
 #### 9.1 Unit tests
+
+##### 9.1.1 Procedure argument validation
 
 **New file:** `plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/procedure/TestCommitOffsetsProcedureValidation.java`
 
@@ -298,13 +392,30 @@ Required cases — every case asserts on `TrinoException` error code and message
 - `group_id` argument null and session `consumer_group_id` absent → `INVALID_PROCEDURE_ARGUMENT` mentioning fallback to session property.
 - `group_id` argument null but session `consumer_group_id` set → resolves to session value (verify by capturing the value the stub factory was called with).
 - `group_id` argument set and session `consumer_group_id` also set → explicit argument wins (verify by captured value).
+- **`group_id` argument set, `committed_read_enabled = true`, session `consumer_group_id` unset → procedure proceeds (does NOT fail with the committed-read-required error). This asserts that step 0's refactor isolates the procedure from the read-path session enforcement.**
 - Schema/table not visible (table description supplier returns empty) → `TableNotFoundException`.
 - Bounds validation: offset < `logStart` and `allow_out_of_range = false` → `INVALID_PROCEDURE_ARGUMENT`.
 - Bounds validation: offset > `logEnd` and `allow_out_of_range = false` → `INVALID_PROCEDURE_ARGUMENT`.
 - Bounds validation: offset = `logEnd` (caught up) → accepted.
 - Bounds validation: offset = `logStart` → accepted.
 - Bounds validation: offset out of range and `allow_out_of_range = true` → bypasses bounds check (verify the bounds service was consulted but did not reject).
-- Bounds validation: offsets for a partition that does not exist → `KAFKA_SPLIT_ERROR` (or whichever code `KafkaOffsetBoundsService.getPartitionBounds` raises) with "Partition X does not exist".
+- Bounds validation: offsets for a partition that does not exist → `KAFKA_SPLIT_ERROR` with "Partition X does not exist".
+
+##### 9.1.2 Consumer factory group-ID resolution
+
+**New file:** `plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestDefaultKafkaConsumerFactoryGroupResolution.java`
+
+Pure unit test against `DefaultKafkaConsumerFactory`. Uses a minimal `ConnectorSession` test double (or the existing one used by other Kafka unit tests) and asserts on the returned `Properties`.
+
+Required cases:
+
+- `committed_read_enabled = false`, no session `consumer_group_id` → `configure(session).getProperty(GROUP_ID_CONFIG)` equals the catalog `kafka.consumer-group-id` value.
+- `committed_read_enabled = false`, session `consumer_group_id = 'override-group'` → `configure(session)` returns `group.id = 'override-group'`.
+- `committed_read_enabled = true`, no session `consumer_group_id` → `configure(session)` throws `INVALID_SESSION_PROPERTY` (existing committed-read contract preserved).
+- `committed_read_enabled = true`, session `consumer_group_id = 'cg'` → `configure(session)` returns `group.id = 'cg'`.
+- `configureForGroup(session, 'explicit-group')`, `committed_read_enabled = true`, no session `consumer_group_id` → succeeds, returns `group.id = 'explicit-group'`. **This asserts step 0's invariant that procedure paths are independent of session-group enforcement.**
+- `configureForMetadata(session)`, `committed_read_enabled = true`, no session `consumer_group_id` → succeeds, returns the placeholder group ID.
+- `baseProperties(session)` does **not** include `GROUP_ID_CONFIG` regardless of session state.
 
 #### 9.2 Integration tests
 
@@ -330,56 +441,68 @@ Required scenarios:
 
 8. **Offset out of range, no override.** Call with `offset = logEnd + 1000`. Assert query fails; broker-side committed offset is unchanged from any prior state.
 
-9. **Offset out of range with override.** Call same as above but with `allow_out_of_range => true`. Assert broker shows the requested offset.
+9. **Offset out of range with override → no consumer.** Call with `offset = logEnd + 1000` and `allow_out_of_range => true`. Assert broker shows the requested offset.
 
-10. **Offset for non-existent partition.** Call with a partition number greater than the topic's partition count. Assert query fails.
+10. **Offset out of range with override × policy ERROR.** Catalog `kafka.committed-read-missing-offset-policy = ERROR`. Run scenario 9, then run a committed-read SELECT against the same group and topic. Assert the SELECT fails (out-of-range committed offset is treated as invalid by the read planner).
 
-11. **Negative offset.** Call with `offset = -1`. Assert query fails.
+11. **Offset out of range with override × policy EARLIEST.** Same setup with policy `EARLIEST`. Run scenario 9, then run committed-read SELECT. Assert the SELECT succeeds and returns rows starting from `logStart`.
 
-12. **Caught-up commit.** Call with `offset = logEnd`. Assert success; broker shows the value.
+12. **Offset out of range with override × policy LATEST.** Same setup with policy `LATEST`. Run scenario 9, then run committed-read SELECT. Assert the SELECT produces a checkpoint-only split, returns 0 rows, and the broker-stored committed offset has been overwritten (no longer matches the procedure-written value).
 
-13. **Empty partition, offset = 0.** Create topic with no rows. Call with `offset = 0`. Assert success; broker shows offset 0.
+13. **Offset for non-existent partition.** Call with a partition number greater than the topic's partition count. Assert query fails.
 
-14. **Idempotent retry.** Call procedure twice with identical arguments. Assert second call succeeds; broker state matches a single call.
+14. **Negative offset.** Call with `offset = -1`. Assert query fails.
 
-15. **After-the-fact commit followed by committed-read.** Run a default-mode SELECT against a topic. Call the procedure to commit `offset = logEnd`. Then run a committed-read SELECT with the same group ID; assert it returns 0 rows (the resume point is at the end). Then append more messages to the topic and run committed-read SELECT again; assert it returns only the new messages.
+15. **Caught-up commit.** Call with `offset = logEnd`. Assert success; broker shows the value.
 
-16. **Concurrent external consumer in the same group.** Start an in-test Kafka consumer that calls `subscribe(topic)` and polls in a loop on the same group ID. Call the procedure. Assert the procedure fails fast with the "Could not acquire partitions" error message (not a hang). Stop the external consumer in `@AfterEach` / `@AfterAll`.
+16. **Empty partition, offset = 0.** Create topic with no rows. Call with `offset = 0`. Assert success; broker shows offset 0. **This explicitly exercises the first-time-commit case for a partition with no group history; it must succeed without `NoOffsetForPartitionException`.**
 
-17. **SSL/TLS path.** If the existing test fixture supports an SSL-enabled broker variant (check the `SslKafkaConsumerFactory` usage in `TestKafkaCommittedReadMode` or sibling tests), repeat scenario (1) over SSL to confirm the procedure picks up `kafka.config.resources` files. If no such fixture exists, skip — call this out in the test class's Javadoc.
+17. **First-time commit on a brand-new group.** Use a `group_id` that has never existed on the broker. Call with `offset = 0` on a non-empty topic. Assert success; broker shows the committed offset. This exercises the case where the consumer joins a group that has no prior offset metadata.
 
-18. **Access control: `checkCanExecuteProcedure` denies.** Use a test session whose access control denies execution. Assert the procedure call fails before any Kafka I/O is attempted (broker shows no committed offset row).
+18. **Idempotent retry.** Call procedure twice with identical arguments. Assert second call succeeds; broker state matches a single call.
 
-19. **Access control: `checkCanSelectFromColumns` denies.** Same shape, denying SELECT on the underlying table. Assert the procedure call fails.
+19. **After-the-fact commit followed by committed-read.** Run a default-mode SELECT against a topic. Call the procedure to commit `offset = logEnd`. Then run a committed-read SELECT with the same group ID; assert it returns 0 rows. Then append more messages to the topic and run committed-read SELECT again; assert it returns only the new messages.
+
+20. **Procedure runs when committed-read mode is enabled and no session group is set.** Set `committed_read_enabled = true` (catalog or session) and ensure no `consumer_group_id` session property is set. Call the procedure with an explicit `group_id` argument. Assert the procedure succeeds. **This is the load-bearing assertion that step 0's refactor works end-to-end.**
+
+21. **Concurrent external consumer in the same group.** Start an in-test Kafka consumer that calls `subscribe(topic)` and polls in a loop on the same group ID. Call the procedure. Assert the procedure fails fast with the "Could not acquire partitions" error message (not a hang, not longer than `MAX_WAIT_FOR_ASSIGNMENT + a margin`). Stop the external consumer in `@AfterEach` / `@AfterAll`.
+
+22. **SSL/TLS path.** If the existing test fixture supports an SSL-enabled broker variant (check the `SslKafkaConsumerFactory` usage in `TestKafkaCommittedReadMode` or sibling tests), repeat scenario (1) over SSL to confirm the procedure picks up `kafka.config.resources` files. If no such fixture exists, skip — call this out in the test class's Javadoc.
+
+23. **Access control: `checkCanExecuteProcedure` denies.** Use a test session whose access control denies execution. Assert the procedure call fails before any Kafka I/O is attempted (broker shows no committed offset row).
+
+24. **Access control: `checkCanSelectFromColumns` denies.** Same shape, denying SELECT on the underlying table. Assert the procedure call fails.
 
 #### 9.3 Regression coverage
 
 Add or extend assertions to confirm pre-existing behavior is unchanged. These can live in existing test classes:
 
-1. **Default-mode SELECT path — no commit.** Extend `TestKafkaCommittedReadMode` (or the closest existing default-mode test) with: run a default-mode SELECT to completion, assert `Admin.listConsumerGroupOffsets(legacyGroupId)` does not contain a committed offset for the topic.
+1. **Default-mode SELECT path — no commit, regardless of group ID.** Extend `TestKafkaCommittedReadMode` (or the closest existing default-mode test) with two cases:
+   - Run a default-mode SELECT to completion with the legacy catalog group ID. Assert `Admin.listConsumerGroupOffsets(legacyGroupId)` does **not** contain a committed offset for the topic.
+   - Run a default-mode SELECT to completion with `SET SESSION consumer_group_id = 'override-group'`. Assert `Admin.listConsumerGroupOffsets('override-group')` does **not** contain a committed offset for the topic. The session override changes the consumer's `group.id`, but default mode still does not commit.
 
-2. **Default-mode SELECT path — uses session `consumer_group_id` if set.** New test in the integration suite: `SET SESSION consumer_group_id = 'override-group'`, run a default-mode SELECT, assert from the broker side that the consumer's group metadata reflects `'override-group'`. (One way to verify is to call `Admin.describeConsumerGroups(...)` and inspect the group state, or to assert that no offset is committed under `legacyGroupId` and the override group exists with no committed offset rows but a recorded group metadata row. Choose whichever is cleanest with the existing fixture.)
+   The override assertion at the broker level is **not** done via `describeConsumerGroups`. Manual-`assign(...)` consumers are not group members and do not register durable group metadata at the broker. The unit test in §9.1.2 is the load-bearing assertion that the override flows into `group.id`; the integration assertion here is the negative one (no commit).
 
-3. **Default-mode SELECT path — falls back to legacy `kafka.consumer-group-id` when session unset.** Existing tests should already cover this; add a single explicit assertion if not.
+2. **Default-mode SELECT path — falls back to legacy `kafka.consumer-group-id` when session unset.** Existing tests should already cover this; add an explicit `Admin.listConsumerGroupOffsets(legacyGroupId)` assertion if not.
 
-4. **Committed-read SELECT — `consumer_group_id` is required.** Existing test should already assert this under the old name; rename and verify the error message references the new name.
+3. **Committed-read SELECT — `consumer_group_id` is required.** Existing test should already assert this under the old name; rename and verify the error message references the new name.
 
-5. **Committed-read SELECT — commit semantics unchanged.** Existing test in `TestKafkaCommittedReadMode` covers this; verify it still passes after the rename and the call-site updates.
+4. **Committed-read SELECT — commit semantics unchanged.** Existing test in `TestKafkaCommittedReadMode` covers this; verify it still passes after the rename and the call-site updates.
 
-6. **Committed-read SELECT — partial-read suppression unchanged.** Same; verify after rename.
+5. **Committed-read SELECT — partial-read suppression unchanged.** Same; verify after rename.
 
-7. **`kafka.system.offsets` PTF — unchanged.** Existing tests for `OffsetBoundsTableFunction` should pass without modification.
+6. **`kafka.system.offsets` PTF — unchanged.** Existing tests for `OffsetBoundsTableFunction` should pass without modification. Add one new assertion that the PTF works when `committed_read_enabled = true` and no session group is set (this exercises step 0's metadata-safe path).
 
-8. **Read-scope enforcement — unchanged.** Existing tests pass without modification.
+7. **Read-scope enforcement — unchanged.** Existing tests pass without modification.
 
-9. **SSL/TLS path for reads — unchanged.** Existing tests pass without modification.
+8. **SSL/TLS path for reads — unchanged.** Existing tests pass without modification.
 
 #### 9.4 Test execution
 
 Run the targeted suites:
 
 ```bash
-./mvnw test -pl :trino-kafka -Dtest='TestKafkaCommittedReadMode,TestKafkaCommitOffsetsProcedure,TestCommitOffsetsProcedureValidation,TestKafkaRecordSetCommittedRead,TestKafkaIntegration*'
+./mvnw test -pl :trino-kafka -Dtest='TestKafkaCommittedReadMode,TestKafkaCommitOffsetsProcedure,TestCommitOffsetsProcedureValidation,TestDefaultKafkaConsumerFactoryGroupResolution,TestKafkaRecordSetCommittedRead,TestKafkaIntegration*'
 ```
 
 If the broader Kafka suite has additional tests that reference `committed_read_group_id` by string literal, run the full Kafka module:
@@ -400,28 +523,33 @@ The change is complete when all of the following are true:
 
 1. `kafka.system.commit_offsets` is callable with both single-partition and map argument forms, and either form successfully commits offsets to Kafka against a real broker (verified via `Admin.listConsumerGroupOffsets`).
 2. The procedure's group ID resolution follows the documented order: explicit argument → session `consumer_group_id` → fail.
-3. Out-of-range offsets are rejected by default and accepted when `allow_out_of_range => true`.
-4. The procedure fails fast (without hanging past `MAX_WAIT_FOR_ASSIGNMENT`) when another consumer in the same group prevents partition ownership.
-5. The procedure's consumer reuses the connector's existing SSL/TLS and bootstrap configuration; no new resource files are required.
-6. The session property previously named `committed_read_group_id` is now `consumer_group_id`, and all references in code, tests, and the README use the new name.
-7. The default-mode read path's consumer group ID resolves to the session property `consumer_group_id` when set, otherwise to the legacy catalog `kafka.consumer-group-id`.
-8. Committed-read mode still requires `consumer_group_id` to be set; its error message references the new name.
-9. The `KafkaRecordSet` data-read path is byte-for-byte unchanged in behavior; existing committed-read tests pass without semantic modification (only string updates for the renamed property).
-10. The `kafka.system.offsets` PTF is unchanged.
-11. Both `checkCanExecuteProcedure` and `checkCanSelectFromColumns` are enforced before any Kafka I/O.
-12. The README contains a "Manual Offset Commit Procedure" section, cross-references from "Recommended Usage" and "Modes", and reflects the property rename in "Properties", "Effective Settings", and "Compatibility rules".
-13. Targeted test suites pass; `./mvnw clean validate -pl :trino-kafka -am` passes.
+3. The procedure succeeds when `committed_read_enabled = true` and no session `consumer_group_id` is set, as long as an explicit `group_id` argument is supplied (integration scenario 20 + unit scenario in §9.1.2 must pass).
+4. The procedure succeeds for first-time commits on a brand-new group and for empty-partition cases (integration scenarios 16 and 17 must pass; no `NoOffsetForPartitionException` surfaces).
+5. Out-of-range offsets are rejected by default and accepted when `allow_out_of_range => true`. The interaction between `allow_out_of_range` and each `kafka.committed-read-missing-offset-policy` value is documented in the README and verified by integration scenarios 10–12.
+6. The procedure fails fast (without hanging past `MAX_WAIT_FOR_ASSIGNMENT`) when another consumer in the same group prevents partition ownership.
+7. The procedure's consumer reuses the connector's existing SSL/TLS and bootstrap configuration; no new resource files are required.
+8. The session property previously named `committed_read_group_id` is now `consumer_group_id`, and all references in code, tests, and the README use the new name.
+9. The default-mode read path's consumer group ID resolves to the session property `consumer_group_id` when set, otherwise to the legacy catalog `kafka.consumer-group-id`. This is verified by `TestDefaultKafkaConsumerFactoryGroupResolution`.
+10. Committed-read mode still requires `consumer_group_id` to be set (when committed-read mode is the read path); its error message references the new name. The procedure is exempt and works without it when given an explicit argument.
+11. The `KafkaRecordSet` data-read path is byte-for-byte unchanged in behavior; existing committed-read tests pass without semantic modification (only string updates for the renamed property).
+12. The `kafka.system.offsets` PTF is unchanged at the call site and now also works when committed-read mode is enabled with no session group.
+13. Both `checkCanExecuteProcedure` and `checkCanSelectFromColumns` are enforced before any Kafka I/O.
+14. The README contains a "Manual Offset Commit Procedure" section, cross-references from "Recommended Usage" and "Modes", reflects the property rename in "Properties", "Effective Settings", and "Compatibility rules", and documents the `allow_out_of_range` × policy interaction.
+15. Targeted test suites pass; `./mvnw clean validate -pl :trino-kafka -am` passes.
 
 ## Risks To Watch
 
-- **Partition-ownership convergence flakiness.** The integration test for "concurrent external consumer in the same group" depends on the external consumer actually holding the partition. Use a deterministic setup: start the external consumer, await its `assignment()` non-empty in the test, then call the procedure. Stop the consumer in cleanup.
-- **`SqlMap` decoding subtlety.** Trino `SqlMap` access requires reading via the type-specific accessor on a raw block; verify with a small ad-hoc test that the decoder rejects negative keys and null entries cleanly. If `mapType(INTEGER, BIGINT)` is awkward to decode in a procedure, fall back to `mapType(BIGINT, BIGINT)` and validate the integer range manually.
-- **Subscribe-mode `poll` timeout vs heartbeat.** With Kafka client defaults (`session.timeout.ms=10s`, `heartbeat.interval.ms=3s`), a `MAX_WAIT_FOR_ASSIGNMENT` of 30s leaves room for two heartbeat cycles. If the rebalance routinely takes longer in the test environment, raise the constant — do not lower the heartbeat.
-- **`auto.offset.reset=none` on a subscribe-mode consumer.** If the consumer ever calls `poll` while it has assignment but no committed offset, `none` causes an exception. The procedure deliberately never reads — it only commits — so this should not surface, but if Kafka changes behavior to read on rebalance, the integration test will catch it. The test for "empty partition, offset = 0" exercises this corner.
-- **Hard rename surface area.** Any operator script using `SET SESSION committed_read_group_id` will silently no-op (Trino ignores unknown session properties on `SET SESSION` only if a property of that name doesn't exist; with a hard rename it raises `INVALID_SESSION_PROPERTY`). Document loudly in the README and the commit message that this is a hard rename.
-- **Behavioral change in default-mode reads.** Users with broker-side ACLs that grant `Group:Read` only on the legacy group ID may see default-mode reads start failing with broker-side authorization errors when they SET SESSION `consumer_group_id`. This is intended behavior — the user took explicit action — but it should be called out in the README.
+- **Step 0 scope.** The factory refactor touches the read path on every query. Run the full Kafka test suite before and after the refactor commit alone, before adding the procedure. If anything regresses, fix step 0 first; do not stack the procedure on top of a broken base.
+- **`enforceRebalance` semantics.** `KafkaConsumer.enforceRebalance()` is a hint, not a guarantee. If the test environment shows that one rejoin attempt is insufficient under load, increase `MAX_REJOIN_ATTEMPTS` rather than the per-poll timeout — multiple short rejoins converge faster than one long wait.
+- **`pause(...)` timing.** `consumer.pause(consumer.assignment())` must be called after the assignment is fully populated; calling it before the join completes is a no-op. Verify by integration test that `commitSync` after `pause` does not regress (it should not — `pause` only affects fetch, not commit).
+- **`Procedure.Argument` constructor surface.** The skeleton uses a `(name, type, required, defaultValue)` shape. If the actual SPI in this Trino version exposes `Procedure.Argument(String, Type)` plus separate optionality plumbing, adapt to the available shape. The implementing agent should grep for existing usages in the Trino codebase before writing the procedure (Iceberg's procedures are good references).
+- **`SqlMap` decoding subtlety.** Trino `SqlMap` access requires reading the keys/values via the type-specific accessor on a raw block. Verify with a unit test that the decoder rejects negative keys and null entries cleanly. If `mapType(INTEGER, BIGINT)` is awkward to decode in a procedure body, fall back to `mapType(BIGINT, BIGINT)` and validate the integer range manually — this changes the user-facing argument type but keeps the user contract identical (Kafka partition IDs fit in `INTEGER` regardless).
+- **Hard rename surface area.** Any operator script using `SET SESSION committed_read_group_id` will raise `INVALID_SESSION_PROPERTY`. Document loudly in the README and the commit message that this is a hard rename.
+- **Behavioral change in default-mode reads.** Users with broker-side ACLs that grant `Group:Read` only on the legacy group ID may see default-mode reads fail with broker-side authorization errors when they SET SESSION `consumer_group_id`. This is intended behavior — the user took explicit action — but it should be called out in the README.
 - **`ThreadContextClassLoader`.** The procedure must wrap the entire body in a `ThreadContextClassLoader` (see `RollbackToSnapshotProcedure.rollbackToSnapshot`). Forgetting this will cause Kafka client class-loading failures at runtime under the plugin classloader.
 - **`getProcedures()` plumbing.** Adding `Set<Procedure>` injection to `KafkaConnector` is a real Guice change. Ensure the `Multibinder` is created (via `newSetBinder(binder, Procedure.class)`) so an empty set is injected even if no procedures are bound — necessary for tests that assemble a minimal connector.
+- **`allow_out_of_range` policy interaction.** The override lets the user write a value the broker accepts but the connector's read planner cannot. Operators who use the override without understanding the catalog policy will be surprised. The README paragraph and integration scenarios 10–12 are the main mitigation.
+- **`describeConsumerGroups` is not a regression signal for default-mode group-ID overrides.** Manual-`assign` consumers do not register as group members. The default-mode override is verified by unit test (`TestDefaultKafkaConsumerFactoryGroupResolution`) and by negative integration assertion ("no commit, regardless of group ID"), not by broker-side group inspection.
 
 ## Out Of Scope (explicitly deferred)
 
