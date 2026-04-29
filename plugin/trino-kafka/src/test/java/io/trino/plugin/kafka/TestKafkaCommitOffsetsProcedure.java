@@ -129,6 +129,34 @@ public class TestKafkaCommitOffsetsProcedure
     }
 
     @Test
+    public void testBrandNewGroupOnNonEmptyTopic()
+    {
+        String groupId = newGroupId();
+
+        assertUpdate(format(
+                "CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offset => 0)",
+                singlePartitionTopic,
+                groupId));
+
+        assertThat(getCommittedOffset(groupId, singlePartitionTopic)).hasValue(0L);
+    }
+
+    @Test
+    public void testIdempotentRetry()
+    {
+        String groupId = newGroupId();
+
+        String sql = format(
+                "CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offset => 5)",
+                singlePartitionTopic,
+                groupId);
+        assertUpdate(sql);
+        assertUpdate(sql);
+
+        assertThat(getCommittedOffset(groupId, singlePartitionTopic)).hasValue(5L);
+    }
+
+    @Test
     public void testCommitOffsetsMultiPartition()
     {
         String groupId = newGroupId();
@@ -193,6 +221,9 @@ public class TestKafkaCommitOffsetsProcedure
         assertQueryFails(
                 format("CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 99, offset => 0)", singlePartitionTopic, groupId),
                 format(".*Partition 99 does not exist for topic '%s'.*", singlePartitionTopic));
+        assertQueryFails(
+                format("CALL system.commit_offsets(schema_name => 'default', table_name => 'missing_commit_offsets_table', group_id => '%s', partition => 0, offset => 0)", groupId),
+                ".*missing_commit_offsets_table.*");
 
         assertThat(getCommittedOffset(groupId, singlePartitionTopic)).isEmpty();
     }

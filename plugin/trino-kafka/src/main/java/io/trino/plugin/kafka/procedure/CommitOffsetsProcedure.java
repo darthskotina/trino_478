@@ -18,13 +18,12 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import com.google.inject.Provider;
+import io.airlift.log.Logger;
 import io.trino.plugin.kafka.KafkaConsumerFactory;
 import io.trino.plugin.kafka.KafkaOffsetBoundsService;
 import io.trino.plugin.kafka.KafkaSessionProperties;
 import io.trino.plugin.kafka.KafkaTopicDescription;
 import io.trino.spi.TrinoException;
-import io.trino.spi.block.Block;
-import io.trino.spi.block.SqlMap;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSession;
@@ -52,7 +51,6 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TypeSignature.mapType;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Integer.MAX_VALUE;
@@ -65,6 +63,7 @@ import static java.util.stream.Collectors.joining;
 public class CommitOffsetsProcedure
         implements Provider<Procedure>
 {
+    private static final Logger log = Logger.get(CommitOffsetsProcedure.class);
     private static final MethodHandle COMMIT_OFFSETS;
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration MAX_WAIT_FOR_ASSIGNMENT = Duration.ofSeconds(30);
@@ -81,7 +80,7 @@ public class CommitOffsetsProcedure
                     String.class,
                     Long.class,
                     Long.class,
-                    SqlMap.class,
+                    Map.class,
                     Boolean.class));
         }
         catch (ReflectiveOperationException e) {
@@ -101,7 +100,7 @@ public class CommitOffsetsProcedure
     {
         this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
         this.offsetBoundsService = requireNonNull(offsetBoundsService, "offsetBoundsService is null");
-        this.offsetsArgumentType = (MapType) requireNonNull(typeManager, "typeManager is null").getType(mapType(INTEGER.getTypeSignature(), BIGINT.getTypeSignature()));
+        this.offsetsArgumentType = (MapType) requireNonNull(typeManager, "typeManager is null").getType(mapType(BIGINT.getTypeSignature(), BIGINT.getTypeSignature()));
     }
 
     @Override
@@ -129,7 +128,7 @@ public class CommitOffsetsProcedure
             String groupId,
             Long partition,
             Long offset,
-            SqlMap offsets,
+            Map<?, ?> offsets,
             Boolean allowOutOfRange)
     {
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(getClass().getClassLoader())) {
@@ -145,7 +144,7 @@ public class CommitOffsetsProcedure
             String groupId,
             Long partition,
             Long offset,
-            SqlMap offsets,
+            Map<?, ?> offsets,
             boolean allowOutOfRange)
     {
         checkProcedureArgument(schemaName != null && !schemaName.isBlank(), "schema_name cannot be null or blank");
@@ -155,11 +154,12 @@ public class CommitOffsetsProcedure
         Map<Integer, Long> requested = getRequestedOffsets(partition, offset, offsets);
 
         SchemaTableName schemaTableName = new SchemaTableName(schemaName, tableName);
+        accessControl.checkCanExecuteProcedure(null, new SchemaRoutineName("system", "commit_offsets"));
+
         KafkaTopicDescription topicDescription = offsetBoundsService.getTopicDescription(session, schemaTableName)
                 .orElseThrow(() -> new TableNotFoundException(schemaTableName));
         String topicName = topicDescription.topicName();
 
-        accessControl.checkCanExecuteProcedure(null, new SchemaRoutineName("system", "commit_offsets"));
         accessControl.checkCanSelectFromColumns(null, schemaTableName, ImmutableSet.of());
 
         validateBounds(session, topicName, requested, allowOutOfRange);
@@ -177,7 +177,7 @@ public class CommitOffsetsProcedure
         return resolvedGroupId;
     }
 
-    private Map<Integer, Long> getRequestedOffsets(Long partition, Long offset, SqlMap offsets)
+    private Map<Integer, Long> getRequestedOffsets(Long partition, Long offset, Map<?, ?> offsets)
     {
         if (offsets != null && (partition != null || offset != null)) {
             throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "must specify either partition+offset or offsets, not both");
@@ -198,20 +198,18 @@ public class CommitOffsetsProcedure
         return getRequestedOffsets(offsets);
     }
 
-    private static Map<Integer, Long> getRequestedOffsets(SqlMap offsets)
+    private static Map<Integer, Long> getRequestedOffsets(Map<?, ?> offsets)
     {
-        checkProcedureArgument(offsets.getSize() > 0, "offsets map cannot be empty");
+        checkProcedureArgument(!offsets.isEmpty(), "offsets map cannot be empty");
         ImmutableMap.Builder<Integer, Long> requested = ImmutableMap.builder();
-        Block keyBlock = offsets.getRawKeyBlock();
-        Block valueBlock = offsets.getRawValueBlock();
-        int rawOffset = offsets.getRawOffset();
-        for (int index = 0; index < offsets.getSize(); index++) {
-            int position = rawOffset + index;
-            checkProcedureArgument(!keyBlock.isNull(position), "offsets map partition key cannot be null");
-            checkProcedureArgument(!valueBlock.isNull(position), "offsets map offset value cannot be null");
+        for (Map.Entry<?, ?> entry : offsets.entrySet()) {
+            Object partition = entry.getKey();
+            Object offset = entry.getValue();
+            checkProcedureArgument(partition != null, "offsets map partition key cannot be null");
+            checkProcedureArgument(offset != null, "offsets map offset value cannot be null");
             requested.put(
-                    validatePartition((long) INTEGER.getInt(keyBlock, position)),
-                    validateOffset(BIGINT.getLong(valueBlock, position)));
+                    validatePartition((Long) partition),
+                    validateOffset((Long) offset));
         }
         return requested.buildOrThrow();
     }
@@ -236,6 +234,11 @@ public class CommitOffsetsProcedure
         Map<TopicPartition, KafkaOffsetBoundsService.OffsetBounds> bounds = offsetBoundsService.getPartitionBounds(session, topicName, requested.keySet());
         requested.forEach((partition, offset) -> {
             KafkaOffsetBoundsService.OffsetBounds partitionBounds = bounds.get(new TopicPartition(topicName, partition));
+            if (partitionBounds == null) {
+                throw new TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format("Partition %s does not exist for topic '%s'", partition, topicName));
+            }
             if (!allowOutOfRange && (offset < partitionBounds.logStart() || offset > partitionBounds.logEnd())) {
                 throw new TrinoException(
                         INVALID_PROCEDURE_ARGUMENT,
@@ -344,7 +347,7 @@ public class CommitOffsetsProcedure
             }
         }
         if (closeFailure != null) {
-            throw closeFailure;
+            log.warn(closeFailure, "Failed to close Kafka consumer after committing offsets");
         }
     }
 

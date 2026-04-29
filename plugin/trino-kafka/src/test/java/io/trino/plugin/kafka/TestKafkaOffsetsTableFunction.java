@@ -16,6 +16,7 @@ package io.trino.plugin.kafka;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
+import io.trino.Session;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
@@ -152,6 +153,22 @@ public class TestKafkaOffsetsTableFunction
                                 "FROM TABLE(system.offsets(schema_name => 'default', table_name => '%s', partition => 1))",
                         offsetsTableName),
                 "VALUES (CAST(0 AS BIGINT), CAST(NULL AS BIGINT))");
+    }
+
+    @Test
+    public void testOffsetsDoesNotRequireConsumerGroupInCommittedReadSession()
+    {
+        Session session = Session.builder(getSession())
+                .setCatalogSessionProperty("kafka", "committed_read_enabled", "true")
+                .build();
+
+        assertQuery(
+                session,
+                format(
+                        "SELECT partition_id, log_start_offset, log_end_offset, last_readable_offset " +
+                                "FROM TABLE(system.offsets(schema_name => 'default', table_name => '%s', partition => 0))",
+                        offsetsTableName),
+                "VALUES (CAST(0 AS BIGINT), CAST(0 AS BIGINT), CAST(4 AS BIGINT), CAST(3 AS BIGINT))");
     }
 
     @Test
