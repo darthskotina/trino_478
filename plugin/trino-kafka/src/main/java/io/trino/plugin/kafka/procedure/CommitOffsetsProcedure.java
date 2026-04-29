@@ -33,7 +33,9 @@ import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.procedure.Procedure;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.TypeManager;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.NoOffsetForPartitionException;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
@@ -41,6 +43,7 @@ import org.apache.kafka.common.TopicPartition;
 import java.lang.invoke.MethodHandle;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -154,6 +157,7 @@ public class CommitOffsetsProcedure
         Map<Integer, Long> requested = getRequestedOffsets(partition, offset, offsets);
 
         SchemaTableName schemaTableName = new SchemaTableName(schemaName, tableName);
+        // Defense in depth for direct connector invocation; the engine also checks procedure execution.
         accessControl.checkCanExecuteProcedure(null, new SchemaRoutineName("system", "commit_offsets"));
 
         KafkaTopicDescription topicDescription = offsetBoundsService.getTopicDescription(session, schemaTableName)
@@ -257,18 +261,32 @@ public class CommitOffsetsProcedure
         KafkaConsumer<byte[], byte[]> consumer = null;
         Throwable failure = null;
         try {
-            consumer = consumerFactory.createForGroup(session, groupId);
-            consumer.subscribe(Set.of(topicName));
+            KafkaConsumer<byte[], byte[]> groupConsumer = consumerFactory.createForGroup(session, groupId);
+            consumer = groupConsumer;
+            groupConsumer.subscribe(Set.of(topicName), new ConsumerRebalanceListener()
+            {
+                @Override
+                public void onPartitionsRevoked(Collection<TopicPartition> partitions) {}
+
+                @Override
+                public void onPartitionsAssigned(Collection<TopicPartition> partitions)
+                {
+                    // Avoid fetch-position initialization before commit when deployments set
+                    // auto.offset.reset=none and the group has no prior committed offsets.
+                    groupConsumer.pause(partitions);
+                }
+            });
             Set<TopicPartition> requestedTopicPartitions = requested.keySet().stream()
                     .map(partition -> new TopicPartition(topicName, partition))
                     .collect(toImmutableSet());
 
-            waitForAssignment(consumer, topicName, groupId, requestedTopicPartitions);
-            consumer.pause(consumer.assignment());
+            waitForAssignment(groupConsumer, topicName, groupId, requestedTopicPartitions);
+            // Defensive no-op for already paused partitions assigned by the rebalance callback.
+            groupConsumer.pause(groupConsumer.assignment());
 
             ImmutableMap.Builder<TopicPartition, OffsetAndMetadata> offsets = ImmutableMap.builder();
             requested.forEach((partition, offset) -> offsets.put(new TopicPartition(topicName, partition), new OffsetAndMetadata(offset)));
-            consumer.commitSync(offsets.buildOrThrow());
+            groupConsumer.commitSync(offsets.buildOrThrow());
         }
         catch (KafkaException e) {
             failure = e;
@@ -288,7 +306,12 @@ public class CommitOffsetsProcedure
         Instant deadline = Instant.now().plus(MAX_WAIT_FOR_ASSIGNMENT);
         int rejoinAttempts = 0;
         while (Instant.now().isBefore(deadline)) {
-            consumer.poll(POLL_TIMEOUT);
+            try {
+                consumer.poll(POLL_TIMEOUT);
+            }
+            catch (NoOffsetForPartitionException e) {
+                consumer.pause(consumer.assignment());
+            }
             if (consumer.assignment().containsAll(requestedTopicPartitions)) {
                 return;
             }

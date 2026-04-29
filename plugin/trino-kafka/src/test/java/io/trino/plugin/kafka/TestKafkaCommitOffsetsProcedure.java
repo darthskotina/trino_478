@@ -27,11 +27,18 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.LongStream;
 
 import static io.trino.plugin.kafka.util.TestUtils.createEmptyTopicDescription;
@@ -53,6 +60,7 @@ public class TestKafkaCommitOffsetsProcedure
     private static final String DEFAULT_CATALOG = "kafka";
     private static final String EARLIEST_CATALOG = "kafka_earliest";
     private static final String LATEST_CATALOG = "kafka_latest";
+    private static final String AUTO_OFFSET_RESET_NONE_CATALOG = "kafka_auto_offset_reset_none";
     private static final String LEGACY_GROUP_ID = "legacy-default-group";
 
     private TestingKafka testingKafka;
@@ -96,6 +104,7 @@ public class TestKafkaCommitOffsetsProcedure
 
         createCatalog(queryRunner, EARLIEST_CATALOG, "EARLIEST");
         createCatalog(queryRunner, LATEST_CATALOG, "LATEST");
+        createAutoOffsetResetNoneCatalog(queryRunner);
 
         testingKafka.createTopicWithConfig(1, 1, singlePartitionTopic, false);
         testingKafka.createTopicWithConfig(2, 1, multiPartitionTopic, false);
@@ -129,6 +138,21 @@ public class TestKafkaCommitOffsetsProcedure
     }
 
     @Test
+    public void testCommitOffsetEqualsLogEnd()
+    {
+        String groupId = newGroupId();
+        long logEnd = getPartitionEndOffsets(singlePartitionTopic, 0).get(0);
+
+        assertUpdate(format(
+                "CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offset => %s)",
+                singlePartitionTopic,
+                groupId,
+                logEnd));
+
+        assertThat(getCommittedOffset(groupId, singlePartitionTopic)).hasValue(logEnd);
+    }
+
+    @Test
     public void testBrandNewGroupOnNonEmptyTopic()
     {
         String groupId = newGroupId();
@@ -137,6 +161,24 @@ public class TestKafkaCommitOffsetsProcedure
                 "CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offset => 0)",
                 singlePartitionTopic,
                 groupId));
+
+        assertThat(getCommittedOffset(groupId, singlePartitionTopic)).hasValue(0L);
+    }
+
+    @Test
+    public void testBrandNewGroupWithAutoOffsetResetNone()
+    {
+        String groupId = newGroupId();
+
+        assertUpdate(
+                Session.builder(getSession())
+                        .setCatalog(AUTO_OFFSET_RESET_NONE_CATALOG)
+                        .setSchema("default")
+                        .build(),
+                format(
+                        "CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offset => 0)",
+                        singlePartitionTopic,
+                        groupId));
 
         assertThat(getCommittedOffset(groupId, singlePartitionTopic)).hasValue(0L);
     }
@@ -215,6 +257,12 @@ public class TestKafkaCommitOffsetsProcedure
         assertQueryFails(
                 format("CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', offset => 1)", singlePartitionTopic, groupId),
                 ".*offset specified without partition.*");
+        assertQueryFails(
+                format("CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offsets => MAP(ARRAY[CAST(0 AS BIGINT)], ARRAY[CAST(1 AS BIGINT)]))", singlePartitionTopic, groupId),
+                ".*must specify either partition\\+offset or offsets, not both.*");
+        assertQueryFails(
+                format("CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', offset => 1, offsets => MAP(ARRAY[CAST(0 AS BIGINT)], ARRAY[CAST(1 AS BIGINT)]))", singlePartitionTopic, groupId),
+                ".*must specify either partition\\+offset or offsets, not both.*");
         assertQueryFails(
                 format("CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', partition => 0, offset => -1)", singlePartitionTopic, groupId),
                 ".*offset must not be negative.*");
@@ -334,6 +382,56 @@ public class TestKafkaCommitOffsetsProcedure
                 privilege(accessControlTopic, SELECT_COLUMN));
     }
 
+    @Test
+    public void testConcurrentConsumerPreventsAcquiringAllPartitions()
+            throws Exception
+    {
+        String groupId = newGroupId();
+        AtomicBoolean running = new AtomicBoolean(true);
+        CountDownLatch assigned = new CountDownLatch(1);
+        AtomicReference<Throwable> backgroundFailure = new AtomicReference<>();
+
+        try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProperties(groupId))) {
+            Thread poller = new Thread(() -> {
+                try {
+                    consumer.subscribe(List.of(multiPartitionTopic));
+                    while (running.get()) {
+                        consumer.poll(Duration.ofMillis(100));
+                        if (!consumer.assignment().isEmpty()) {
+                            assigned.countDown();
+                        }
+                    }
+                }
+                catch (Throwable e) {
+                    if (running.get()) {
+                        backgroundFailure.set(e);
+                    }
+                }
+            }, "commit-offsets-contention-consumer");
+            poller.start();
+
+            try {
+                assertThat(assigned.await(30, TimeUnit.SECONDS)).isTrue();
+                assertThat(backgroundFailure.get()).isNull();
+
+                long start = System.nanoTime();
+                assertQueryFails(
+                        format(
+                                "CALL system.commit_offsets(schema_name => 'default', table_name => '%s', group_id => '%s', offsets => MAP(ARRAY[CAST(0 AS BIGINT), CAST(1 AS BIGINT)], ARRAY[CAST(0 AS BIGINT), CAST(0 AS BIGINT)]))",
+                                multiPartitionTopic,
+                                groupId),
+                        ".*Could not acquire partitions.*another consumer.*");
+                assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(35));
+            }
+            finally {
+                running.set(false);
+                consumer.wakeup();
+                poller.join(TimeUnit.SECONDS.toMillis(10));
+            }
+            assertThat(poller.isAlive()).isFalse();
+        }
+    }
+
     private void createCatalog(QueryRunner queryRunner, String catalogName, String missingOffsetPolicy)
     {
         queryRunner.createCatalog(catalogName, "kafka", ImmutableMap.of(
@@ -342,6 +440,19 @@ public class TestKafkaCommitOffsetsProcedure
                 "kafka.table-description-supplier", "test",
                 "kafka.consumer-group-id", LEGACY_GROUP_ID,
                 "kafka.committed-read-missing-offset-policy", missingOffsetPolicy));
+    }
+
+    private void createAutoOffsetResetNoneCatalog(QueryRunner queryRunner)
+            throws Exception
+    {
+        Path propertiesFile = Files.createTempFile("kafka-auto-offset-reset-none", ".properties");
+        Files.writeString(propertiesFile, "auto.offset.reset=none\n");
+        queryRunner.createCatalog(AUTO_OFFSET_RESET_NONE_CATALOG, "kafka", ImmutableMap.of(
+                "kafka.nodes", testingKafka.getConnectString(),
+                "kafka.messages-per-split", "100",
+                "kafka.table-description-supplier", "test",
+                "kafka.consumer-group-id", LEGACY_GROUP_ID,
+                "kafka.config.resources", propertiesFile.toString()));
     }
 
     private Session committedReadSession(String catalog, String groupId)
