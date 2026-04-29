@@ -121,7 +121,25 @@ Note: `METADATA_GROUP_ID_PLACEHOLDER` is a fixed string; metadata calls (`partit
   2. Else if `KafkaSessionProperties.getConsumerGroupIdSessionProperty(session)` is present, return its value.
   3. Else return the legacy catalog `consumerGroupId` (`kafka.consumer-group-id`).
 
-The interface's default `configure` method then composes `baseProperties` + `resolveReadPathGroupId` and preserves the existing read-path semantics. Custom `KafkaConsumerFactory` implementations that override `configure(...)` directly should be updated to override `baseProperties(...)` and `resolveReadPathGroupId(...)` instead. Search the codebase for any other implementations of `KafkaConsumerFactory` (currently only `DefaultKafkaConsumerFactory`) and update them.
+The interface's default `configure` method then composes `baseProperties` + `resolveReadPathGroupId` and preserves the existing read-path semantics.
+
+**File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/SslKafkaConsumerFactory.java`
+
+The branch has a second `KafkaConsumerFactory` implementation that wraps a `@ForKafkaSsl` delegate (typically `DefaultKafkaConsumerFactory`) and overlays SSL client properties on top. Today it overrides the single-method `configure(...)`. After the interface refactor, that one override is no longer enough — `configureForGroup(...)` and `configureForMetadata(...)` would inherit the interface defaults and call `baseProperties(...)` on `SslKafkaConsumerFactory` (which is now an abstract method on the interface), causing a compile error. Even if it compiled, the SSL overlay would not flow into the new procedure or metadata paths.
+
+Required changes:
+
+- Override `baseProperties(ConnectorSession)`: take the delegate's `baseProperties(session)`, overlay the SSL `map` on top, return the result. This is the only place the SSL overlay needs to be applied — `configure`, `configureForGroup`, and `configureForMetadata` all compose on top of `baseProperties`, so SSL flows into every path automatically.
+- Override `resolveReadPathGroupId(ConnectorSession)`: delegate to `delegate.resolveReadPathGroupId(session)`.
+- **Delete the existing `configure(ConnectorSession)` override.** The interface's `default` `configure` now produces the same result (delegate `baseProperties` + SSL overlay + delegate `resolveReadPathGroupId`).
+
+Verification: search the codebase for any other implementations of `KafkaConsumerFactory` before merging:
+
+```bash
+grep -rn "implements KafkaConsumerFactory" plugin/trino-kafka/src/
+```
+
+If a third implementation appears (custom plugin subclassing the connector), it must be updated the same way — override `baseProperties` and `resolveReadPathGroupId`, drop the `configure` override.
 
 **File:** `plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaOffsetBoundsService.java`
 
@@ -266,7 +284,13 @@ Notes for the implementing agent:
    - Resolve `schemaName`, `tableName`. Reject blank/null.
    - Resolve `groupId`: explicit argument wins; else `KafkaSessionProperties.getConsumerGroupIdSessionProperty(session)`; else throw `TrinoException(INVALID_PROCEDURE_ARGUMENT, "group_id must be supplied either as a procedure argument or via session property 'consumer_group_id'")`.
    - Reject blank `groupId`.
-   - Reject if both `(partition, offset)` and `offsets` are supplied; reject if neither is supplied.
+   - **Form detection** — exactly one of the two forms must be specified. The truth table for `(partition, offset, offsets)`:
+     - `(null, null, null)` → reject `INVALID_PROCEDURE_ARGUMENT` "must specify either partition+offset or offsets".
+     - `(set, set, null)` → accept single-partition form.
+     - `(null, null, set)` → accept map form.
+     - `(set, null, null)` → reject `INVALID_PROCEDURE_ARGUMENT` "partition specified without offset; both must be supplied for the single-partition form".
+     - `(null, set, null)` → reject `INVALID_PROCEDURE_ARGUMENT` "offset specified without partition; both must be supplied for the single-partition form".
+     - any combination where `offsets` is set together with `partition` and/or `offset` → reject `INVALID_PROCEDURE_ARGUMENT` "must specify either partition+offset or offsets, not both".
    - If single-partition form: build `Map<Integer, Long> requested = Map.of(partition.intValue(), offset)`.
      - Reject `partition < 0`, `partition > Integer.MAX_VALUE`, `offset < 0`.
    - If map form: extract `Map<Integer, Long>` from the `SqlMap`. Reject empty map. Reject any null key/value, any key < 0, any key > Integer.MAX_VALUE, any value < 0.
@@ -333,6 +357,8 @@ Re-verify after editing:
 
 - `DefaultKafkaConsumerFactory.baseProperties(session)` still sets `enable.auto.commit=false`, deserializers, bootstrap, buffer size, key/value deserializer, and resource-file overrides — unchanged from the current `configure` body except that `GROUP_ID_CONFIG` is no longer set there.
 - `DefaultKafkaConsumerFactory.configure(session)` (composed default) preserves the previous read-path semantics for both default and committed-read modes.
+- `SslKafkaConsumerFactory.baseProperties(session)` overlays the SSL `map` on the delegate's base properties; the SSL overlay is now applied to every factory path (`configure`, `configureForGroup`, `configureForMetadata`) without per-method duplication.
+- `SslKafkaConsumerFactory.configure(session)` (now the inherited default) produces the same property set as the previous explicit override.
 - `KafkaSplitManager.getSplits(...)` still resolves the committed-read group ID via `KafkaSessionProperties.getRequiredCommittedReadGroupId(session)` after the rename (read pipeline unchanged).
 - `KafkaCommittedReadRegistry.register(...)` still keys on the committed-read group ID and is unaffected by the rename.
 - `KafkaRecordSet.close()` still gates commit on the same five conditions and uses `commitSync` on the same assign-mode consumer.
@@ -380,7 +406,11 @@ Required cases — every case asserts on `TrinoException` error code and message
 - Schema name null / blank → `INVALID_PROCEDURE_ARGUMENT`.
 - Table name null / blank → `INVALID_PROCEDURE_ARGUMENT`.
 - Both `(partition, offset)` and `offsets` map supplied → `INVALID_PROCEDURE_ARGUMENT` mentioning "must specify either partition+offset or offsets, not both".
-- Neither form supplied → `INVALID_PROCEDURE_ARGUMENT` mentioning "must specify either partition+offset or offsets".
+- `partition` set together with `offsets` (no `offset`) → `INVALID_PROCEDURE_ARGUMENT` mentioning "not both".
+- `offset` set together with `offsets` (no `partition`) → `INVALID_PROCEDURE_ARGUMENT` mentioning "not both".
+- Neither form supplied (all three null) → `INVALID_PROCEDURE_ARGUMENT` mentioning "must specify either partition+offset or offsets".
+- `partition` set, `offset` null, `offsets` null → `INVALID_PROCEDURE_ARGUMENT` mentioning "partition specified without offset".
+- `offset` set, `partition` null, `offsets` null → `INVALID_PROCEDURE_ARGUMENT` mentioning "offset specified without partition".
 - Single-partition: negative partition → `INVALID_PROCEDURE_ARGUMENT`.
 - Single-partition: partition > `Integer.MAX_VALUE` → `INVALID_PROCEDURE_ARGUMENT`.
 - Single-partition: negative offset → `INVALID_PROCEDURE_ARGUMENT`.
@@ -438,6 +468,12 @@ Required scenarios:
 6. **Group ID blank argument.** Call with `group_id => ''`. Assert query fails.
 
 7. **Schema/table not visible.** Call with a non-existent table name. Assert `TableNotFoundException`.
+
+7a. **Argument form: partition without offset.** Call with `partition => 0` and no `offset` and no `offsets`. Assert query fails with the expected message; broker shows no committed offset row.
+
+7b. **Argument form: offset without partition.** Call with `offset => 100` and no `partition` and no `offsets`. Assert query fails; broker shows no committed offset row.
+
+7c. **Argument form: mixed (partition+offsets).** Call with `partition => 0` and `offsets => MAP(...)`. Assert query fails; broker shows no committed offset row.
 
 8. **Offset out of range, no override.** Call with `offset = logEnd + 1000`. Assert query fails; broker-side committed offset is unchanged from any prior state.
 
@@ -527,7 +563,7 @@ The change is complete when all of the following are true:
 4. The procedure succeeds for first-time commits on a brand-new group and for empty-partition cases (integration scenarios 16 and 17 must pass; no `NoOffsetForPartitionException` surfaces).
 5. Out-of-range offsets are rejected by default and accepted when `allow_out_of_range => true`. The interaction between `allow_out_of_range` and each `kafka.committed-read-missing-offset-policy` value is documented in the README and verified by integration scenarios 10–12.
 6. The procedure fails fast (without hanging past `MAX_WAIT_FOR_ASSIGNMENT`) when another consumer in the same group prevents partition ownership.
-7. The procedure's consumer reuses the connector's existing SSL/TLS and bootstrap configuration; no new resource files are required.
+7. The procedure's consumer reuses the connector's existing SSL/TLS and bootstrap configuration; no new resource files are required. `SslKafkaConsumerFactory` is updated to override `baseProperties(...)` and `resolveReadPathGroupId(...)`, and the SSL overlay applies to every factory path (`configure`, `configureForGroup`, `configureForMetadata`) without per-path duplication.
 8. The session property previously named `committed_read_group_id` is now `consumer_group_id`, and all references in code, tests, and the README use the new name.
 9. The default-mode read path's consumer group ID resolves to the session property `consumer_group_id` when set, otherwise to the legacy catalog `kafka.consumer-group-id`. This is verified by `TestDefaultKafkaConsumerFactoryGroupResolution`.
 10. Committed-read mode still requires `consumer_group_id` to be set (when committed-read mode is the read path); its error message references the new name. The procedure is exempt and works without it when given an explicit argument.
@@ -540,6 +576,7 @@ The change is complete when all of the following are true:
 ## Risks To Watch
 
 - **Step 0 scope.** The factory refactor touches the read path on every query. Run the full Kafka test suite before and after the refactor commit alone, before adding the procedure. If anything regresses, fix step 0 first; do not stack the procedure on top of a broken base.
+- **SSL factory delegation.** Forgetting to override `baseProperties(...)` on `SslKafkaConsumerFactory` will cause a compile failure (because the interface method is abstract). Forgetting to override `resolveReadPathGroupId(...)` will silently route read-path group resolution through the delegate's logic — which is correct in the only current configuration but is surprising if a future variant overrides resolution differently. Override both explicitly even though `resolveReadPathGroupId` could fall back to a default delegating to the wrapped factory.
 - **`enforceRebalance` semantics.** `KafkaConsumer.enforceRebalance()` is a hint, not a guarantee. If the test environment shows that one rejoin attempt is insufficient under load, increase `MAX_REJOIN_ATTEMPTS` rather than the per-poll timeout — multiple short rejoins converge faster than one long wait.
 - **`pause(...)` timing.** `consumer.pause(consumer.assignment())` must be called after the assignment is fully populated; calling it before the join completes is a no-op. Verify by integration test that `commitSync` after `pause` does not regress (it should not — `pause` only affects fetch, not commit).
 - **`Procedure.Argument` constructor surface.** The skeleton uses a `(name, type, required, defaultValue)` shape. If the actual SPI in this Trino version exposes `Procedure.Argument(String, Type)` plus separate optionality plumbing, adapt to the available shape. The implementing agent should grep for existing usages in the Trino codebase before writing the procedure (Iceberg's procedures are good references).
