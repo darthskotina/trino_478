@@ -25,6 +25,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
+import io.trino.spi.procedure.Procedure;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
 
@@ -48,6 +49,7 @@ public class KafkaConnector
     private final ConnectorPageSinkProvider pageSinkProvider;
     private final List<PropertyMetadata<?>> sessionProperties;
     private final Set<ConnectorTableFunction> tableFunctions;
+    private final Set<Procedure> procedures;
     private final FunctionProvider functionProvider;
 
     @Inject
@@ -59,6 +61,7 @@ public class KafkaConnector
             ConnectorPageSinkProvider pageSinkProvider,
             Set<SessionPropertiesProvider> sessionProperties,
             Set<ConnectorTableFunction> tableFunctions,
+            Set<Procedure> procedures,
             FunctionProvider functionProvider)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
@@ -70,6 +73,8 @@ public class KafkaConnector
                 .flatMap(sessionPropertiesProvider -> sessionPropertiesProvider.getSessionProperties().stream())
                 .collect(toImmutableList());
         this.tableFunctions = requireNonNull(tableFunctions, "tableFunctions is null").stream()
+                .collect(toImmutableSet());
+        this.procedures = requireNonNull(procedures, "procedures is null").stream()
                 .collect(toImmutableSet());
         this.functionProvider = requireNonNull(functionProvider, "functionProvider is null");
     }
@@ -115,6 +120,12 @@ public class KafkaConnector
     public Set<ConnectorTableFunction> getTableFunctions()
     {
         return tableFunctions;
+    }
+
+    @Override
+    public Set<Procedure> getProcedures()
+    {
+        return procedures;
     }
 
     @Override

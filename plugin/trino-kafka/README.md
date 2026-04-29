@@ -16,8 +16,8 @@ Default mode keeps the existing bounded-scan behavior:
 - multiple splits per partition are allowed
 - reads ignore Kafka consumer-group committed offsets
 - no offsets are committed by reads
-- `kafka.consumer-group-id` and its current hardcoded default remain
-  compatibility behavior for this mode only
+- the effective consumer group ID is `consumer_group_id` when set, otherwise
+  `kafka.consumer-group-id`
 
 Committed-read mode is opt-in and changes read semantics:
 
@@ -36,7 +36,7 @@ Catalog properties used by committed-read mode:
 Session properties used by committed-read mode:
 
 - `committed_read_enabled`
-- `committed_read_group_id`
+- `consumer_group_id`
 - `committed_read_allow_offset_rewind`
 - `committed_read_max_rows_per_partition`
 
@@ -46,11 +46,11 @@ Legacy compatibility property:
 
 Compatibility rules:
 
-- `kafka.consumer-group-id` remains active only for default-mode consumer
-  construction
+- `kafka.consumer-group-id` remains the legacy default-mode fallback
+- `consumer_group_id` overrides `kafka.consumer-group-id` for default-mode
+  consumer construction
 - `kafka.consumer-group-id` is never used as a fallback committed-read group
-- `committed_read_group_id` is a new session property used only when
-  committed-read mode is enabled
+- `consumer_group_id` is required when committed-read mode reads run
 
 ## Effective Settings
 
@@ -61,7 +61,7 @@ Committed-read mode resolution:
 
 Committed-read group ID resolution:
 
-1. session `committed_read_group_id`, if set
+1. session `consumer_group_id`, if set
 2. otherwise fail the query
 
 Rules:
@@ -82,7 +82,7 @@ Example:
 
 ```sql
 SET SESSION kafka.committed_read_enabled = true;
-SET SESSION kafka.committed_read_group_id = 'svc-orders-main';
+SET SESSION kafka.consumer_group_id = 'svc-orders-main';
 
 SELECT *
 FROM kafka.default.orders_topic;
@@ -287,6 +287,97 @@ FROM TABLE(kafka.system.offsets(schema_name => 'default', table_name => 'orders'
 The function returns one row per partition. Add `ORDER BY` if deterministic
 output ordering matters.
 
+The function uses metadata-only Kafka consumers and does not require
+`consumer_group_id`, even when committed-read mode is enabled for the session.
+
+## Manual Offset Commit Procedure
+
+This branch adds `kafka.system.commit_offsets` for explicit, user-driven Kafka
+offset commits. The procedure resolves `(schema_name, table_name)` through the
+connector table description supplier; it does not accept arbitrary topic names.
+
+Argument forms:
+
+- single partition: `partition => <bigint>, offset => <bigint>`
+- multiple partitions: `offsets => MAP(ARRAY[partition...], ARRAY[offset...])`
+- exactly one form must be supplied
+- `allow_out_of_range => true` optionally bypasses broker-range validation
+
+Group ID resolution:
+
+- explicit `group_id` argument wins
+- otherwise session `consumer_group_id` is used
+- otherwise the procedure fails
+- this is independent of `committed_read_enabled`; an explicit `group_id`
+  works even when committed-read mode is enabled and no session group is set
+
+Commit mechanics:
+
+- the procedure uses a short-lived subscribe-mode Kafka consumer that joins the
+  group
+- this differs from the connector read path, which keeps manual `assign(...)`
+  semantics
+- broker ACLs may therefore differ from default-mode reads
+- after assignment converges, the procedure pauses assigned partitions and
+  commits the requested offsets
+
+Validation:
+
+- every requested partition must exist in the connector-visible topic
+- offsets must be inside `[logStart, logEnd]` unless
+  `allow_out_of_range => true`
+- `logEnd` is valid and means the group is caught up
+
+Concurrency:
+
+- Kafka offset commits are last-writer-wins
+- a concurrent member in the same group can prevent the procedure from owning
+  all requested partitions
+- in that case, the procedure fails fast after a bounded assignment wait
+
+`allow_out_of_range` and committed-read policy:
+
+- with `kafka.committed-read-missing-offset-policy=ERROR`, a subsequent
+  committed-read query fails until the group offset is reset
+- with `EARLIEST`, a subsequent committed-read query treats the invalid value
+  as missing and reads from `logStart`
+- with `LATEST`, a subsequent committed-read query produces a checkpoint-only
+  split and overwrites the stored value with a clamped broker-range offset
+- use `allow_out_of_range => true` only when the next consumer's policy and
+  expectations are known
+
+The procedure is idempotent: repeated calls with the same arguments produce the
+same broker-side committed offset state.
+
+Examples:
+
+```sql
+CALL kafka.system.commit_offsets(
+    schema_name => 'default',
+    table_name => 'orders',
+    group_id => 'svc-orders-main',
+    partition => 0,
+    offset => 12345);
+```
+
+```sql
+CALL kafka.system.commit_offsets(
+    schema_name => 'default',
+    table_name => 'orders',
+    group_id => 'svc-orders-main',
+    offsets => MAP(ARRAY[0, 1, 2], ARRAY[12345, 12001, 11990]));
+```
+
+```sql
+CALL kafka.system.commit_offsets(
+    schema_name => 'default',
+    table_name => 'orders',
+    group_id => 'svc-orders-main',
+    partition => 0,
+    offset => 999999999,
+    allow_out_of_range => true);
+```
+
 ## Concurrency And Safety
 
 Committed-read mode keeps manual `assign(...)` semantics. It does not use Kafka
@@ -346,6 +437,12 @@ Use committed-read mode for:
 - workloads that want resume behavior across repeated Trino reads
 - controlled rewind/replay workflows that use explicit `_partition_offset`
   windows under a dedicated group ID
+
+Use `system.commit_offsets` for:
+
+- environments where manual-assign `OffsetCommit` is denied but joined-group
+  subscribe-mode commits are allowed
+- after-the-fact, operator-controlled advancement or repair of group offsets
 
 Use default mode for:
 

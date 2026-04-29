@@ -55,6 +55,7 @@ public class TestKafkaCommittedReadMode
 
     private TestingKafka testingKafka;
     private String defaultModeTopic;
+    private String defaultModeOverrideTopic;
     private String defaultModePartitionedTopic;
     private String resumeTopic;
     private String multiPartitionCommittedTopic;
@@ -86,6 +87,7 @@ public class TestKafkaCommittedReadMode
         testingKafka.start();
 
         defaultModeTopic = newTopicName("default_mode");
+        defaultModeOverrideTopic = newTopicName("default_mode_override");
         defaultModePartitionedTopic = newTopicName("default_mode_partitioned");
         resumeTopic = newTopicName("resume");
         multiPartitionCommittedTopic = newTopicName("multi_partition_resume");
@@ -112,6 +114,7 @@ public class TestKafkaCommittedReadMode
         QueryRunner queryRunner = KafkaQueryRunner.builder(testingKafka)
                 .setExtraTopicDescription(ImmutableMap.<SchemaTableName, KafkaTopicDescription>builder()
                         .put(createEmptyTopicDescription(defaultModeTopic, new SchemaTableName("default", defaultModeTopic)))
+                        .put(createEmptyTopicDescription(defaultModeOverrideTopic, new SchemaTableName("default", defaultModeOverrideTopic)))
                         .put(createEmptyTopicDescription(defaultModePartitionedTopic, new SchemaTableName("default", defaultModePartitionedTopic)))
                         .put(createEmptyTopicDescription(resumeTopic, new SchemaTableName("default", resumeTopic)))
                         .put(createEmptyTopicDescription(multiPartitionCommittedTopic, new SchemaTableName("default", multiPartitionCommittedTopic)))
@@ -154,6 +157,7 @@ public class TestKafkaCommittedReadMode
                 "kafka.committed-read-missing-offset-policy", "LATEST"));
 
         testingKafka.createTopicWithConfig(1, 1, defaultModeTopic, false);
+        testingKafka.createTopicWithConfig(1, 1, defaultModeOverrideTopic, false);
         testingKafka.createTopicWithConfig(2, 1, defaultModePartitionedTopic, false);
         testingKafka.createTopicWithConfig(1, 1, resumeTopic, false);
         testingKafka.createTopicWithConfig(2, 1, multiPartitionCommittedTopic, false);
@@ -186,6 +190,22 @@ public class TestKafkaCommittedReadMode
 
         assertThat(computeActual(format("SELECT count(*) FROM default.%s", defaultModeTopic)).getOnlyValue()).isEqualTo(20L);
         assertThat(getCommittedOffset(LEGACY_GROUP_ID, defaultModeTopic)).isEmpty();
+    }
+
+    @Test
+    public void testDefaultModeWithSessionConsumerGroupDoesNotCommitOffsets()
+    {
+        sendMessages(defaultModeOverrideTopic, 5);
+
+        String groupId = "group_default_override_" + UUID.randomUUID().toString().replace("-", "");
+        Session session = Session.builder(getSession())
+                .setCatalog(DEFAULT_CATALOG)
+                .setSchema("default")
+                .setCatalogSessionProperty(DEFAULT_CATALOG, "consumer_group_id", groupId)
+                .build();
+
+        assertThat(computeActual(session, format("SELECT count(*) FROM default.%s", defaultModeOverrideTopic)).getOnlyValue()).isEqualTo(5L);
+        assertThat(getCommittedOffset(groupId, defaultModeOverrideTopic)).isEmpty();
     }
 
     @Test
@@ -364,7 +384,7 @@ public class TestKafkaCommittedReadMode
                 .setCatalogSessionProperty(DEFAULT_CATALOG, "committed_read_enabled", "true")
                 .build();
 
-        assertQueryFails(session, format("SELECT count(*) FROM default.%s", missingGroupTopic), ".*Committed-read mode requires session property 'committed_read_group_id' to be set.*");
+        assertQueryFails(session, format("SELECT count(*) FROM default.%s", missingGroupTopic), ".*Committed-read mode requires session property 'consumer_group_id' to be set.*");
         assertThat(getCommittedOffset(LEGACY_GROUP_ID, missingGroupTopic)).isEmpty();
     }
 
@@ -583,7 +603,7 @@ public class TestKafkaCommittedReadMode
                 .setCatalog(catalog)
                 .setSchema("default")
                 .setCatalogSessionProperty(catalog, "committed_read_enabled", "true")
-                .setCatalogSessionProperty(catalog, "committed_read_group_id", groupId);
+                .setCatalogSessionProperty(catalog, "consumer_group_id", groupId);
         if (maxRowsPerPartition != null) {
             sessionBuilder.setCatalogSessionProperty(catalog, "committed_read_max_rows_per_partition", Long.toString(maxRowsPerPartition));
         }
@@ -602,7 +622,7 @@ public class TestKafkaCommittedReadMode
                 .setCatalog(catalog)
                 .setSchema("default")
                 .setCatalogSessionProperty(catalog, "committed_read_enabled", "true")
-                .setCatalogSessionProperty(catalog, "committed_read_group_id", groupId)
+                .setCatalogSessionProperty(catalog, "consumer_group_id", groupId)
                 .setCatalogSessionProperty(catalog, "committed_read_allow_offset_rewind", "true");
         if (maxRowsPerPartition != null) {
             sessionBuilder.setCatalogSessionProperty(catalog, "committed_read_max_rows_per_partition", Long.toString(maxRowsPerPartition));

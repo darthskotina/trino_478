@@ -195,9 +195,15 @@ public class TestKafkaRecordSetCommittedRead
             }
 
             @Override
-            public Properties configure(io.trino.spi.connector.ConnectorSession session)
+            public Properties baseProperties(io.trino.spi.connector.ConnectorSession session)
             {
                 return new Properties();
+            }
+
+            @Override
+            public String resolveReadPathGroupId(io.trino.spi.connector.ConnectorSession session)
+            {
+                return "test-group";
             }
         };
         return new KafkaRecordSet(

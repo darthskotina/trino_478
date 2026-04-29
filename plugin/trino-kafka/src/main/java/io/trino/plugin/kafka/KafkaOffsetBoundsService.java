@@ -26,8 +26,10 @@ import org.apache.kafka.common.TopicPartition;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static java.lang.String.format;
 import static java.util.Comparator.comparingInt;
@@ -66,7 +68,7 @@ public class KafkaOffsetBoundsService
 
     public TopicPartitionOffsets getTopicPartitionOffsets(ConnectorSession session, String topicName, Optional<Integer> partition)
     {
-        try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.create(session)) {
+        try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.createForMetadata(session)) {
             List<PartitionInfo> partitionInfos = kafkaConsumer.partitionsFor(topicName).stream()
                     .sorted(comparingInt(PartitionInfo::partition))
                     .collect(toImmutableList());
@@ -85,6 +87,31 @@ public class KafkaOffsetBoundsService
             }
             throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to fetch offset bounds for topic '%s'", topicName), e);
         }
+    }
+
+    public Map<TopicPartition, OffsetBounds> getPartitionBounds(ConnectorSession session, String topicName, Set<Integer> requestedPartitions)
+    {
+        requireNonNull(requestedPartitions, "requestedPartitions is null");
+        TopicPartitionOffsets topicPartitionOffsets = getTopicPartitionOffsets(session, topicName, Optional.empty());
+        Map<Integer, PartitionInfo> partitionInfos = topicPartitionOffsets.partitionInfos().stream()
+                .collect(toImmutableMap(PartitionInfo::partition, partitionInfo -> partitionInfo));
+
+        for (int partition : requestedPartitions) {
+            if (!partitionInfos.containsKey(partition)) {
+                throw new TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format("Partition %s does not exist for topic '%s'", partition, topicName));
+            }
+        }
+
+        return requestedPartitions.stream()
+                .map(partitionInfos::get)
+                .map(KafkaOffsetBoundsService::toTopicPartition)
+                .collect(toImmutableMap(
+                        topicPartition -> topicPartition,
+                        topicPartition -> new OffsetBounds(
+                                topicPartitionOffsets.beginningOffsets().get(topicPartition),
+                                topicPartitionOffsets.endOffsets().get(topicPartition))));
     }
 
     private static List<PartitionInfo> getRequestedPartitions(String topicName, List<PartitionInfo> partitionInfos, Optional<Integer> partition)
@@ -119,4 +146,6 @@ public class KafkaOffsetBoundsService
             requireNonNull(endOffsets, "endOffsets is null");
         }
     }
+
+    public record OffsetBounds(long logStart, long logEnd) {}
 }

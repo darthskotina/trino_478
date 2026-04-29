@@ -745,7 +745,7 @@ public class TestKafkaCommittedReadSplitManager
     {
         Map<String, Object> propertyValues = new HashMap<>();
         propertyValues.put("committed_read_enabled", true);
-        propertyValues.put("committed_read_group_id", groupId);
+        propertyValues.put("consumer_group_id", groupId);
         if (maxRowsPerPartition != null) {
             propertyValues.put("committed_read_max_rows_per_partition", maxRowsPerPartition);
         }
@@ -784,7 +784,7 @@ public class TestKafkaCommittedReadSplitManager
     {
         Map<String, Object> propertyValues = new HashMap<>();
         propertyValues.put("committed_read_enabled", true);
-        propertyValues.put("committed_read_group_id", groupId);
+        propertyValues.put("consumer_group_id", groupId);
         propertyValues.put("committed_read_allow_offset_rewind", true);
         if (maxRowsPerPartition != null) {
             propertyValues.put("committed_read_max_rows_per_partition", maxRowsPerPartition);

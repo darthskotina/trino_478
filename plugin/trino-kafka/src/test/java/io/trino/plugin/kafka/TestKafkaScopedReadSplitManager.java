@@ -36,6 +36,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.stream.LongStream;
 
@@ -359,9 +360,20 @@ public class TestKafkaScopedReadSplitManager
     private static KafkaSplitManager noBrokerSplitManager(KafkaConfig config, KafkaInternalFieldManager internalFieldManager, BrokerAccessTracker tracker)
             throws Exception
     {
-        KafkaConsumerFactory consumerFactory = session -> {
-            tracker.consumerFactoryUsed = true;
-            throw new AssertionError("Kafka consumer should not be configured for scoped-read rejection");
+        KafkaConsumerFactory consumerFactory = new KafkaConsumerFactory()
+        {
+            @Override
+            public Properties baseProperties(ConnectorSession session)
+            {
+                tracker.consumerFactoryUsed = true;
+                throw new AssertionError("Kafka consumer should not be configured for scoped-read rejection");
+            }
+
+            @Override
+            public String resolveReadPathGroupId(ConnectorSession session)
+            {
+                return "test-group";
+            }
         };
         KafkaAdminFactory adminFactory = session -> {
             tracker.adminFactoryUsed = true;
@@ -417,7 +429,7 @@ public class TestKafkaScopedReadSplitManager
                 .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties())
                 .setPropertyValues(Map.of(
                         "committed_read_enabled", true,
-                        "committed_read_group_id", groupId))
+                        "consumer_group_id", groupId))
                 .build();
     }
 

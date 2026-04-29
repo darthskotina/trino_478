@@ -38,11 +38,17 @@ public class SslKafkaConsumerFactory
     }
 
     @Override
-    public Properties configure(ConnectorSession session)
+    public Properties baseProperties(ConnectorSession session)
     {
         Properties properties = new Properties();
-        properties.putAll(delegate.configure(session));
+        properties.putAll(delegate.baseProperties(session));
         properties.putAll(map);
         return properties;
+    }
+
+    @Override
+    public String resolveReadPathGroupId(ConnectorSession session)
+    {
+        return delegate.resolveReadPathGroupId(session);
     }
 }

@@ -34,7 +34,7 @@ public final class KafkaSessionProperties
     private static final String TIMESTAMP_UPPER_BOUND_FORCE_PUSH_DOWN_ENABLED = "timestamp_upper_bound_force_push_down_enabled";
     private static final String ENFORCE_READ_SCOPE = "enforce_read_scope";
     private static final String COMMITTED_READ_ENABLED = "committed_read_enabled";
-    private static final String COMMITTED_READ_GROUP_ID = "committed_read_group_id";
+    private static final String CONSUMER_GROUP_ID = "consumer_group_id";
     private static final String COMMITTED_READ_ALLOW_OFFSET_REWIND = "committed_read_allow_offset_rewind";
     private static final String COMMITTED_READ_MAX_ROWS_PER_PARTITION = "committed_read_max_rows_per_partition";
     private final List<PropertyMetadata<?>> sessionProperties;
@@ -57,12 +57,12 @@ public final class KafkaSessionProperties
                         "Enable or disable committed-read mode",
                         kafkaConfig.isCommittedReadEnabled(), false),
                 stringProperty(
-                        COMMITTED_READ_GROUP_ID,
-                        "Kafka consumer group ID used by committed-read mode",
+                        CONSUMER_GROUP_ID,
+                        "Kafka consumer group ID; required by committed-read mode and overrides the legacy default-mode group ID when set",
                         null,
                         value -> {
                             if (value != null && value.isBlank()) {
-                                throw new TrinoException(INVALID_SESSION_PROPERTY, format("Session property '%s' must not be blank", COMMITTED_READ_GROUP_ID));
+                                throw new TrinoException(INVALID_SESSION_PROPERTY, format("Session property '%s' must not be blank", CONSUMER_GROUP_ID));
                             }
                         },
                         false),
@@ -111,9 +111,9 @@ public final class KafkaSessionProperties
         return session.getProperty(ENFORCE_READ_SCOPE, Boolean.class);
     }
 
-    public static Optional<String> getCommittedReadGroupId(ConnectorSession session)
+    public static Optional<String> getConsumerGroupIdSessionProperty(ConnectorSession session)
     {
-        return Optional.ofNullable(session.getProperty(COMMITTED_READ_GROUP_ID, String.class));
+        return Optional.ofNullable(session.getProperty(CONSUMER_GROUP_ID, String.class));
     }
 
     public static boolean isCommittedReadAllowOffsetRewind(ConnectorSession session)
@@ -128,9 +128,9 @@ public final class KafkaSessionProperties
 
     public static String getRequiredCommittedReadGroupId(ConnectorSession session)
     {
-        return getCommittedReadGroupId(session)
+        return getConsumerGroupIdSessionProperty(session)
                 .orElseThrow(() -> new TrinoException(
                         INVALID_SESSION_PROPERTY,
-                        format("Committed-read mode requires session property '%s' to be set", COMMITTED_READ_GROUP_ID)));
+                        format("Committed-read mode requires session property '%s' to be set", CONSUMER_GROUP_ID)));
     }
 }

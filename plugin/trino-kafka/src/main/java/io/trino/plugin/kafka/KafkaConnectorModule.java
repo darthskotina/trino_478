@@ -23,6 +23,7 @@ import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorRecordSetProvide
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.classloader.ForClassLoaderSafe;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
+import io.trino.plugin.kafka.procedure.CommitOffsetsProcedure;
 import io.trino.plugin.kafka.ptf.OffsetBoundsFunction;
 import io.trino.plugin.kafka.schema.confluent.ConfluentModule;
 import io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryTableDescriptionSupplier;
@@ -34,6 +35,7 @@ import io.trino.spi.connector.ConnectorRecordSetProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
+import io.trino.spi.procedure.Procedure;
 import io.trino.spi.type.TypeManager;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
@@ -77,6 +79,7 @@ public class KafkaConnectorModule
         bindTopicSchemaProviderModule(FileTableDescriptionSupplier.NAME, new FileTableDescriptionSupplierModule());
         bindTopicSchemaProviderModule(ConfluentSchemaRegistryTableDescriptionSupplier.NAME, new ConfluentModule(typeManager));
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(KafkaSessionProperties.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, Procedure.class).addBinding().toProvider(CommitOffsetsProcedure.class).in(Scopes.SINGLETON);
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(OffsetBoundsFunction.class).in(Scopes.SINGLETON);
         jsonCodecBinder(binder).bindJsonCodec(KafkaTopicDescription.class);
     }

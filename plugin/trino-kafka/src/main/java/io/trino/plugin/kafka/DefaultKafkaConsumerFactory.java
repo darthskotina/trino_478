@@ -27,7 +27,6 @@ import static io.trino.plugin.kafka.utils.PropertiesUtils.readProperties;
 import static java.util.stream.Collectors.joining;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG;
-import static org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.RECEIVE_BUFFER_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG;
@@ -51,7 +50,7 @@ public class DefaultKafkaConsumerFactory
     }
 
     @Override
-    public Properties configure(ConnectorSession session)
+    public Properties baseProperties(ConnectorSession session)
     {
         Properties properties = new Properties();
         properties.putAll(configurationProperties);
@@ -62,16 +61,17 @@ public class DefaultKafkaConsumerFactory
         properties.setProperty(VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         properties.setProperty(ENABLE_AUTO_COMMIT_CONFIG, Boolean.toString(false));
         properties.setProperty(RECEIVE_BUFFER_CONFIG, Long.toString(kafkaBufferSize.toBytes()));
-        properties.setProperty(GROUP_ID_CONFIG, getEffectiveConsumerGroupId(session));
 
         return properties;
     }
 
-    private String getEffectiveConsumerGroupId(ConnectorSession session)
+    @Override
+    public String resolveReadPathGroupId(ConnectorSession session)
     {
         if (KafkaSessionProperties.isCommittedReadEnabled(session)) {
             return KafkaSessionProperties.getRequiredCommittedReadGroupId(session);
         }
-        return consumerGroupId;
+        return KafkaSessionProperties.getConsumerGroupIdSessionProperty(session)
+                .orElse(consumerGroupId);
     }
 }
