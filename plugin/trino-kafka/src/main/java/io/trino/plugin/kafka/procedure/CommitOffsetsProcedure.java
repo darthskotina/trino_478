@@ -68,8 +68,9 @@ public class CommitOffsetsProcedure
 {
     private static final Logger log = Logger.get(CommitOffsetsProcedure.class);
     private static final MethodHandle COMMIT_OFFSETS;
-    private static final Duration POLL_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration POLL_TIMEOUT = Duration.ofMillis(100);
     private static final Duration MAX_WAIT_FOR_ASSIGNMENT = Duration.ofSeconds(30);
+    private static final Duration REJOIN_GRACE_PERIOD = Duration.ofSeconds(2);
     private static final int MAX_REJOIN_ATTEMPTS = 1;
 
     static {
@@ -235,6 +236,11 @@ public class CommitOffsetsProcedure
 
     private void validateBounds(ConnectorSession session, String topicName, Map<Integer, Long> requested, boolean allowOutOfRange)
     {
+        if (allowOutOfRange) {
+            offsetBoundsService.validatePartitionsExist(session, topicName, requested.keySet());
+            return;
+        }
+
         Map<TopicPartition, KafkaOffsetBoundsService.OffsetBounds> bounds = offsetBoundsService.getPartitionBounds(session, topicName, requested.keySet());
         requested.forEach((partition, offset) -> {
             KafkaOffsetBoundsService.OffsetBounds partitionBounds = bounds.get(new TopicPartition(topicName, partition));
@@ -303,7 +309,9 @@ public class CommitOffsetsProcedure
 
     private static void waitForAssignment(KafkaConsumer<byte[], byte[]> consumer, String topicName, String groupId, Set<TopicPartition> requestedTopicPartitions)
     {
-        Instant deadline = Instant.now().plus(MAX_WAIT_FOR_ASSIGNMENT);
+        Instant now = Instant.now();
+        Instant deadline = now.plus(MAX_WAIT_FOR_ASSIGNMENT);
+        Instant rejoinAfter = now.plus(REJOIN_GRACE_PERIOD);
         int rejoinAttempts = 0;
         while (Instant.now().isBefore(deadline)) {
             try {
@@ -315,7 +323,7 @@ public class CommitOffsetsProcedure
             if (consumer.assignment().containsAll(requestedTopicPartitions)) {
                 return;
             }
-            if (rejoinAttempts < MAX_REJOIN_ATTEMPTS) {
+            if (rejoinAttempts < MAX_REJOIN_ATTEMPTS && Instant.now().isAfter(rejoinAfter)) {
                 consumer.enforceRebalance();
                 rejoinAttempts++;
             }

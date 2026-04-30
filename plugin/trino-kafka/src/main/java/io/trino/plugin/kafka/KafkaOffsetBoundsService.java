@@ -30,6 +30,7 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static java.lang.String.format;
 import static java.util.Comparator.comparingInt;
@@ -112,6 +113,29 @@ public class KafkaOffsetBoundsService
                         topicPartition -> new OffsetBounds(
                                 topicPartitionOffsets.beginningOffsets().get(topicPartition),
                                 topicPartitionOffsets.endOffsets().get(topicPartition))));
+    }
+
+    public void validatePartitionsExist(ConnectorSession session, String topicName, Set<Integer> requestedPartitions)
+    {
+        requireNonNull(requestedPartitions, "requestedPartitions is null");
+        try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.createForMetadata(session)) {
+            Set<Integer> partitions = kafkaConsumer.partitionsFor(topicName).stream()
+                    .map(PartitionInfo::partition)
+                    .collect(toImmutableSet());
+            for (int partition : requestedPartitions) {
+                if (!partitions.contains(partition)) {
+                    throw new TrinoException(
+                            KAFKA_SPLIT_ERROR,
+                            format("Partition %s does not exist for topic '%s'", partition, topicName));
+                }
+            }
+        }
+        catch (Exception e) {
+            if (e instanceof TrinoException) {
+                throw e;
+            }
+            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to fetch partition metadata for topic '%s'", topicName), e);
+        }
     }
 
     private static List<PartitionInfo> getRequestedPartitions(String topicName, List<PartitionInfo> partitionInfos, Optional<Integer> partition)

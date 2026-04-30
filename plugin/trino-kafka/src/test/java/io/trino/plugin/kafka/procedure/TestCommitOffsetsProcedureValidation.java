@@ -173,7 +173,8 @@ public class TestCommitOffsetsProcedureValidation
         TestingOffsetBoundsService boundsService = new TestingOffsetBoundsService();
         assertThatThrownBy(() -> newProcedure(new CapturingConsumerFactory(), boundsService).commitOffsets(session(), allowAccess(), "default", "orders", "group", 0L, 11L, null, true))
                 .isInstanceOf(ReachedCommitPathException.class);
-        assertThat(boundsService.boundsConsulted).isTrue();
+        assertThat(boundsService.partitionMetadataConsulted).isTrue();
+        assertThat(boundsService.boundsConsulted).isFalse();
     }
 
     @Test
@@ -187,6 +188,10 @@ public class TestCommitOffsetsProcedureValidation
         assertKafkaSplitError(
                 () -> newProcedure(new CapturingConsumerFactory(), incompleteBoundsService).commitOffsets(session(), allowAccess(), "default", "orders", "group", 0L, 0L, null, false),
                 "Partition 0 does not exist for topic 'orders-topic'");
+
+        assertKafkaSplitError(
+                () -> newProcedure().commitOffsets(session(), allowAccess(), "default", "orders", "group", 99L, 0L, null, true),
+                "Partition 99 does not exist for topic 'orders-topic'");
     }
 
     private static CommitOffsetsProcedure newProcedure()
@@ -331,6 +336,7 @@ public class TestCommitOffsetsProcedureValidation
                 Optional.empty()));
         private boolean topicDescriptionConsulted;
         private boolean boundsConsulted;
+        private boolean partitionMetadataConsulted;
         private boolean returnIncompleteBounds;
 
         private TestingOffsetBoundsService()
@@ -361,6 +367,17 @@ public class TestCommitOffsetsProcedureValidation
                 bounds.put(new TopicPartition(topicName, partition), new OffsetBounds(5, 10));
             }
             return bounds.buildOrThrow();
+        }
+
+        @Override
+        public void validatePartitionsExist(ConnectorSession session, String topicName, Set<Integer> requestedPartitions)
+        {
+            partitionMetadataConsulted = true;
+            for (int partition : requestedPartitions) {
+                if (partition != 0) {
+                    throw new TrinoException(KAFKA_SPLIT_ERROR, "Partition %s does not exist for topic '%s'".formatted(partition, topicName));
+                }
+            }
         }
     }
 
