@@ -292,7 +292,15 @@ public class CommitOffsetsProcedure
                     .map(partition -> new TopicPartition(topicName, partition))
                     .collect(toImmutableSet());
 
-            waitForAssignment(groupConsumer, topicName, groupId, requestedTopicPartitions);
+            try {
+                waitForAssignment(groupConsumer, topicName, groupId, requestedTopicPartitions);
+            }
+            catch (KafkaException e) {
+                throw new TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format("Failed to acquire Kafka partitions for group ID '%s' on topic '%s'", groupId, topicName),
+                        e);
+            }
             // Defensive no-op for already paused partitions assigned by the rebalance callback.
             groupConsumer.pause(groupConsumer.assignment());
 
@@ -307,10 +315,16 @@ public class CommitOffsetsProcedure
                         format("Timed out committing Kafka offsets for group ID '%s' on topic '%s' within %s", groupId, topicName, offsetCommitTimeout),
                         e);
             }
+            catch (KafkaException e) {
+                throw new TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format("Failed to commit Kafka offsets for group ID '%s' on topic '%s'", groupId, topicName),
+                        e);
+            }
         }
         catch (KafkaException e) {
             failure = e;
-            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to commit Kafka offsets for group ID '%s' on topic '%s'", groupId, topicName), e);
+            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed during Kafka commit_offsets execution for group ID '%s' on topic '%s'", groupId, topicName), e);
         }
         catch (RuntimeException e) {
             failure = e;
