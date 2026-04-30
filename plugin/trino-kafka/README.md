@@ -318,11 +318,22 @@ Commit mechanics:
 - this differs from the connector read path, which keeps manual `assign(...)`
   semantics
 - broker ACLs may therefore differ from default-mode reads
-- after assignment converges, the procedure pauses assigned partitions and
-  commits the requested offsets
+- a rebalance listener pauses assigned partitions immediately, before Kafka
+  initializes fetch positions; this is required for deployments that set
+  `auto.offset.reset=none`
+- after assignment converges, the procedure commits the requested offsets
 - offset commits use an explicit timeout; close-time `unsubscribe()` or
   `close()` failures after a successful commit are logged but do not fail the
   procedure
+
+Timeout tuning:
+
+- `kafka.commit-offsets-assignment-poll-timeout` controls each poll while the
+  procedure waits for group assignment; default is `1s`
+- `kafka.commit-offsets-assignment-timeout` controls the total assignment wait;
+  default is `30s`
+- `kafka.commit-offsets-commit-timeout` controls the Kafka offset commit wait;
+  default is `30s`
 
 Validation:
 

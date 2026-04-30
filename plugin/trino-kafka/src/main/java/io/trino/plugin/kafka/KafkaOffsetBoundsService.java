@@ -70,7 +70,7 @@ public class KafkaOffsetBoundsService
     public TopicPartitionOffsets getTopicPartitionOffsets(ConnectorSession session, String topicName, Optional<Integer> partition)
     {
         try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.createForMetadata(session)) {
-            List<PartitionInfo> partitionInfos = kafkaConsumer.partitionsFor(topicName).stream()
+            List<PartitionInfo> partitionInfos = getPartitionInfo(kafkaConsumer, topicName).stream()
                     .sorted(comparingInt(PartitionInfo::partition))
                     .collect(toImmutableList());
             List<PartitionInfo> requestedPartitions = getRequestedPartitions(topicName, partitionInfos, partition);
@@ -119,7 +119,7 @@ public class KafkaOffsetBoundsService
     {
         requireNonNull(requestedPartitions, "requestedPartitions is null");
         try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.createForMetadata(session)) {
-            Set<Integer> partitions = kafkaConsumer.partitionsFor(topicName).stream()
+            Set<Integer> partitions = getPartitionInfo(kafkaConsumer, topicName).stream()
                     .map(PartitionInfo::partition)
                     .collect(toImmutableSet());
             for (int partition : requestedPartitions) {
@@ -136,6 +136,19 @@ public class KafkaOffsetBoundsService
             }
             throw new TrinoException(KAFKA_SPLIT_ERROR, format("Failed to fetch partition metadata for topic '%s'", topicName), e);
         }
+    }
+
+    private static List<PartitionInfo> getPartitionInfo(KafkaConsumer<byte[], byte[]> kafkaConsumer, String topicName)
+    {
+        return requirePartitionInfo(topicName, kafkaConsumer.partitionsFor(topicName));
+    }
+
+    static List<PartitionInfo> requirePartitionInfo(String topicName, List<PartitionInfo> partitionInfos)
+    {
+        if (partitionInfos == null) {
+            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Topic '%s' was not found on the broker", topicName));
+        }
+        return partitionInfos;
     }
 
     private static List<PartitionInfo> getRequestedPartitions(String topicName, List<PartitionInfo> partitionInfos, Optional<Integer> partition)

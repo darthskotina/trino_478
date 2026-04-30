@@ -21,6 +21,8 @@ import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
+import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 import io.trino.plugin.kafka.schema.file.FileTableDescriptionSupplier;
 import io.trino.spi.HostAddress;
 import jakarta.validation.constraints.Min;
@@ -35,6 +37,7 @@ import java.util.Set;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 @DefunctConfig("kafka.connect-timeout")
 public class KafkaConfig
@@ -54,6 +57,9 @@ public class KafkaConfig
     private boolean enforceReadScope = true;
     private boolean committedReadEnabled;
     private KafkaCommittedReadMissingOffsetPolicy committedReadMissingOffsetPolicy = KafkaCommittedReadMissingOffsetPolicy.ERROR;
+    private Duration commitOffsetsAssignmentPollTimeout = new Duration(1, SECONDS);
+    private Duration commitOffsetsAssignmentTimeout = new Duration(30, SECONDS);
+    private Duration commitOffsetsCommitTimeout = new Duration(30, SECONDS);
 
     @Size(min = 1)
     public Set<HostAddress> getNodes()
@@ -238,6 +244,48 @@ public class KafkaConfig
     public KafkaConfig setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy committedReadMissingOffsetPolicy)
     {
         this.committedReadMissingOffsetPolicy = requireNonNull(committedReadMissingOffsetPolicy, "committedReadMissingOffsetPolicy is null");
+        return this;
+    }
+
+    @MinDuration("1ms")
+    public Duration getCommitOffsetsAssignmentPollTimeout()
+    {
+        return commitOffsetsAssignmentPollTimeout;
+    }
+
+    @Config("kafka.commit-offsets-assignment-poll-timeout")
+    @ConfigDescription("Poll timeout while commit_offsets waits for Kafka group assignment")
+    public KafkaConfig setCommitOffsetsAssignmentPollTimeout(Duration commitOffsetsAssignmentPollTimeout)
+    {
+        this.commitOffsetsAssignmentPollTimeout = requireNonNull(commitOffsetsAssignmentPollTimeout, "commitOffsetsAssignmentPollTimeout is null");
+        return this;
+    }
+
+    @MinDuration("1ms")
+    public Duration getCommitOffsetsAssignmentTimeout()
+    {
+        return commitOffsetsAssignmentTimeout;
+    }
+
+    @Config("kafka.commit-offsets-assignment-timeout")
+    @ConfigDescription("Maximum time commit_offsets waits to acquire requested Kafka partitions")
+    public KafkaConfig setCommitOffsetsAssignmentTimeout(Duration commitOffsetsAssignmentTimeout)
+    {
+        this.commitOffsetsAssignmentTimeout = requireNonNull(commitOffsetsAssignmentTimeout, "commitOffsetsAssignmentTimeout is null");
+        return this;
+    }
+
+    @MinDuration("1ms")
+    public Duration getCommitOffsetsCommitTimeout()
+    {
+        return commitOffsetsCommitTimeout;
+    }
+
+    @Config("kafka.commit-offsets-commit-timeout")
+    @ConfigDescription("Maximum time commit_offsets waits for Kafka offset commit completion")
+    public KafkaConfig setCommitOffsetsCommitTimeout(Duration commitOffsetsCommitTimeout)
+    {
+        this.commitOffsetsCommitTimeout = requireNonNull(commitOffsetsCommitTimeout, "commitOffsetsCommitTimeout is null");
         return this;
     }
 }

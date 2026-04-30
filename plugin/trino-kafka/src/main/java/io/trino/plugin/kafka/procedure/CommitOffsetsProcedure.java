@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import com.google.inject.Provider;
 import io.airlift.log.Logger;
+import io.trino.plugin.kafka.KafkaConfig;
 import io.trino.plugin.kafka.KafkaConsumerFactory;
 import io.trino.plugin.kafka.KafkaOffsetBoundsService;
 import io.trino.plugin.kafka.KafkaSessionProperties;
@@ -39,6 +40,7 @@ import org.apache.kafka.clients.consumer.NoOffsetForPartitionException;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.TimeoutException;
 
 import java.lang.invoke.MethodHandle;
 import java.time.Duration;
@@ -68,11 +70,6 @@ public class CommitOffsetsProcedure
 {
     private static final Logger log = Logger.get(CommitOffsetsProcedure.class);
     private static final MethodHandle COMMIT_OFFSETS;
-    private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
-    private static final Duration MAX_WAIT_FOR_ASSIGNMENT = Duration.ofSeconds(30);
-    private static final Duration REJOIN_GRACE_PERIOD = Duration.ofSeconds(5);
-    private static final Duration OFFSET_COMMIT_TIMEOUT = Duration.ofSeconds(30);
-    private static final int MAX_REJOIN_ATTEMPTS = 1;
 
     static {
         try {
@@ -96,16 +93,24 @@ public class CommitOffsetsProcedure
     private final KafkaConsumerFactory consumerFactory;
     private final KafkaOffsetBoundsService offsetBoundsService;
     private final MapType offsetsArgumentType;
+    private final Duration assignmentPollTimeout;
+    private final Duration maxWaitForAssignment;
+    private final Duration offsetCommitTimeout;
 
     @Inject
     public CommitOffsetsProcedure(
             KafkaConsumerFactory consumerFactory,
             KafkaOffsetBoundsService offsetBoundsService,
-            TypeManager typeManager)
+            TypeManager typeManager,
+            KafkaConfig kafkaConfig)
     {
         this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
         this.offsetBoundsService = requireNonNull(offsetBoundsService, "offsetBoundsService is null");
         this.offsetsArgumentType = (MapType) requireNonNull(typeManager, "typeManager is null").getType(mapType(BIGINT.getTypeSignature(), BIGINT.getTypeSignature()));
+        requireNonNull(kafkaConfig, "kafkaConfig is null");
+        this.assignmentPollTimeout = Duration.ofMillis(kafkaConfig.getCommitOffsetsAssignmentPollTimeout().toMillis());
+        this.maxWaitForAssignment = Duration.ofMillis(kafkaConfig.getCommitOffsetsAssignmentTimeout().toMillis());
+        this.offsetCommitTimeout = Duration.ofMillis(kafkaConfig.getCommitOffsetsCommitTimeout().toMillis());
     }
 
     @Override
@@ -293,7 +298,15 @@ public class CommitOffsetsProcedure
 
             ImmutableMap.Builder<TopicPartition, OffsetAndMetadata> offsets = ImmutableMap.builder();
             requested.forEach((partition, offset) -> offsets.put(new TopicPartition(topicName, partition), new OffsetAndMetadata(offset)));
-            groupConsumer.commitSync(offsets.buildOrThrow(), OFFSET_COMMIT_TIMEOUT);
+            try {
+                groupConsumer.commitSync(offsets.buildOrThrow(), offsetCommitTimeout);
+            }
+            catch (TimeoutException e) {
+                throw new TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format("Timed out committing Kafka offsets for group ID '%s' on topic '%s' within %s", groupId, topicName, offsetCommitTimeout),
+                        e);
+            }
         }
         catch (KafkaException e) {
             failure = e;
@@ -308,25 +321,19 @@ public class CommitOffsetsProcedure
         }
     }
 
-    private static void waitForAssignment(KafkaConsumer<byte[], byte[]> consumer, String topicName, String groupId, Set<TopicPartition> requestedTopicPartitions)
+    private void waitForAssignment(KafkaConsumer<byte[], byte[]> consumer, String topicName, String groupId, Set<TopicPartition> requestedTopicPartitions)
     {
         Instant now = Instant.now();
-        Instant deadline = now.plus(MAX_WAIT_FOR_ASSIGNMENT);
-        Instant rejoinAfter = now.plus(REJOIN_GRACE_PERIOD);
-        int rejoinAttempts = 0;
+        Instant deadline = now.plus(maxWaitForAssignment);
         while (Instant.now().isBefore(deadline)) {
             try {
-                consumer.poll(POLL_TIMEOUT);
+                consumer.poll(assignmentPollTimeout);
             }
             catch (NoOffsetForPartitionException e) {
                 consumer.pause(consumer.assignment());
             }
             if (consumer.assignment().containsAll(requestedTopicPartitions)) {
                 return;
-            }
-            if (rejoinAttempts < MAX_REJOIN_ATTEMPTS && !consumer.assignment().isEmpty() && Instant.now().isAfter(rejoinAfter)) {
-                consumer.enforceRebalance();
-                rejoinAttempts++;
             }
         }
 
@@ -342,7 +349,7 @@ public class CommitOffsetsProcedure
                                 .collect(joining(", ")),
                         groupId,
                         topicName,
-                        NANOSECONDS.toSeconds(MAX_WAIT_FOR_ASSIGNMENT.toNanos())));
+                        NANOSECONDS.toSeconds(maxWaitForAssignment.toNanos())));
     }
 
     private static void closeConsumer(KafkaConsumer<byte[], byte[]> consumer, Throwable failure)

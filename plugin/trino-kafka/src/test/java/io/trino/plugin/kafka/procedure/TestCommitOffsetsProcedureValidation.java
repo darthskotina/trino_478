@@ -226,7 +226,7 @@ public class TestCommitOffsetsProcedureValidation
 
     private static CommitOffsetsProcedure newProcedure(CapturingConsumerFactory consumerFactory, KafkaOffsetBoundsService offsetBoundsService)
     {
-        return new CommitOffsetsProcedure(consumerFactory, offsetBoundsService, TESTING_TYPE_MANAGER);
+        return new CommitOffsetsProcedure(consumerFactory, offsetBoundsService, TESTING_TYPE_MANAGER, new KafkaConfig());
     }
 
     private static ConnectorSession session()

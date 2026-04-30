@@ -16,6 +16,7 @@ package io.trino.plugin.kafka;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.airlift.units.Duration;
 import io.trino.plugin.kafka.schema.file.FileTableDescriptionSupplier;
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +29,7 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class TestKafkaConfig
 {
@@ -47,7 +49,10 @@ public class TestKafkaConfig
                 .setConsumerGroupId("bigdata-spark-streaming")
                 .setEnforceReadScope(true)
                 .setCommittedReadEnabled(false)
-                .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.ERROR));
+                .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.ERROR)
+                .setCommitOffsetsAssignmentPollTimeout(new Duration(1, SECONDS))
+                .setCommitOffsetsAssignmentTimeout(new Duration(30, SECONDS))
+                .setCommitOffsetsCommitTimeout(new Duration(30, SECONDS)));
     }
 
     @Test
@@ -71,6 +76,9 @@ public class TestKafkaConfig
                 .put("kafka.enforce-read-scope", "false")
                 .put("kafka.committed-read-enabled", "true")
                 .put("kafka.committed-read-missing-offset-policy", "LATEST")
+                .put("kafka.commit-offsets-assignment-poll-timeout", "2s")
+                .put("kafka.commit-offsets-assignment-timeout", "45s")
+                .put("kafka.commit-offsets-commit-timeout", "20s")
                 .buildOrThrow();
 
         KafkaConfig expected = new KafkaConfig()
@@ -86,7 +94,10 @@ public class TestKafkaConfig
                 .setConsumerGroupId("legacy-read-group")
                 .setEnforceReadScope(false)
                 .setCommittedReadEnabled(true)
-                .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.LATEST);
+                .setCommittedReadMissingOffsetPolicy(KafkaCommittedReadMissingOffsetPolicy.LATEST)
+                .setCommitOffsetsAssignmentPollTimeout(new Duration(2, SECONDS))
+                .setCommitOffsetsAssignmentTimeout(new Duration(45, SECONDS))
+                .setCommitOffsetsCommitTimeout(new Duration(20, SECONDS));
 
         assertFullMapping(properties, expected);
     }
