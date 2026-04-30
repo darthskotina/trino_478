@@ -148,13 +148,13 @@ public class TestCommitOffsetsProcedureValidation
     }
 
     @Test
-    public void testExecuteAccessControlRunsBeforeTableLookup()
+    public void testExecuteAccessControlRunsBeforeArgumentValidationAndTableLookup()
             throws Exception
     {
         TestingOffsetBoundsService boundsService = new TestingOffsetBoundsService();
         boundsService.topicDescription = Optional.empty();
 
-        assertThatThrownBy(() -> newProcedure(new CapturingConsumerFactory(), boundsService).commitOffsets(session(), denyExecuteAccess(), "default", "orders", "group", 0L, 0L, null, false))
+        assertThatThrownBy(() -> newProcedure(new CapturingConsumerFactory(), boundsService).commitOffsets(session(), denyExecuteAccess(), "default", "orders", null, null, null, null, false))
                 .isInstanceOf(AccessDeniedException.class)
                 .hasMessageContaining("Cannot execute procedure system.commit_offsets");
         assertThat(boundsService.topicDescriptionConsulted).isFalse();

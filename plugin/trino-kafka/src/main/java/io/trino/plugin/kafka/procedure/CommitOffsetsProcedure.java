@@ -160,12 +160,12 @@ public class CommitOffsetsProcedure
         checkProcedureArgument(schemaName != null && !schemaName.isBlank(), "schema_name cannot be null or blank");
         checkProcedureArgument(tableName != null && !tableName.isBlank(), "table_name cannot be null or blank");
 
-        String resolvedGroupId = resolveGroupId(session, groupId);
-        Map<Integer, Long> requested = getRequestedOffsets(partition, offset, offsets);
-
         SchemaTableName schemaTableName = new SchemaTableName(schemaName, tableName);
         // Defense in depth for direct connector invocation; the engine also checks procedure execution.
         accessControl.checkCanExecuteProcedure(null, new SchemaRoutineName("system", "commit_offsets"));
+
+        String resolvedGroupId = resolveGroupId(session, groupId);
+        Map<Integer, Long> requested = getRequestedOffsets(partition, offset, offsets);
 
         KafkaTopicDescription topicDescription = offsetBoundsService.getTopicDescription(session, schemaTableName)
                 .orElseThrow(() -> new TableNotFoundException(schemaTableName));
@@ -255,7 +255,7 @@ public class CommitOffsetsProcedure
                         KAFKA_SPLIT_ERROR,
                         format("Partition %s does not exist for topic '%s'", partition, topicName));
             }
-            if (!allowOutOfRange && (offset < partitionBounds.logStart() || offset > partitionBounds.logEnd())) {
+            if (offset < partitionBounds.logStart() || offset > partitionBounds.logEnd()) {
                 throw new TrinoException(
                         INVALID_PROCEDURE_ARGUMENT,
                         format(
