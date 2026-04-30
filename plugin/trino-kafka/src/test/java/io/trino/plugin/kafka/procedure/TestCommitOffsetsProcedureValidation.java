@@ -14,6 +14,7 @@
 package io.trino.plugin.kafka.procedure;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.kafka.KafkaConfig;
 import io.trino.plugin.kafka.KafkaConsumerFactory;
 import io.trino.plugin.kafka.KafkaOffsetBoundsService;
@@ -43,6 +44,7 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.spi.security.AccessDeniedException.denyExecuteProcedure;
+import static io.trino.spi.security.AccessDeniedException.denySelectColumns;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -159,6 +161,18 @@ public class TestCommitOffsetsProcedureValidation
     }
 
     @Test
+    public void testSelectAccessControlRunsBeforeCommit()
+            throws Exception
+    {
+        CapturingConsumerFactory consumerFactory = new CapturingConsumerFactory();
+
+        assertThatThrownBy(() -> newProcedure(consumerFactory).commitOffsets(session(), denySelectAccess(), "default", "orders", "group", 0L, 0L, null, false))
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessageContaining("Cannot select from columns");
+        assertThat(consumerFactory.groupId).isNull();
+    }
+
+    @Test
     public void testBoundsValidation()
             throws Exception
     {
@@ -189,9 +203,13 @@ public class TestCommitOffsetsProcedureValidation
                 () -> newProcedure(new CapturingConsumerFactory(), incompleteBoundsService).commitOffsets(session(), allowAccess(), "default", "orders", "group", 0L, 0L, null, false),
                 "Partition 0 does not exist for topic 'orders-topic'");
 
+        TestingOffsetBoundsService overrideBoundsService = new TestingOffsetBoundsService();
         assertKafkaSplitError(
-                () -> newProcedure().commitOffsets(session(), allowAccess(), "default", "orders", "group", 99L, 0L, null, true),
+                () -> newProcedure(new CapturingConsumerFactory(), overrideBoundsService).commitOffsets(session(), allowAccess(), "default", "orders", "group", 99L, 0L, null, true),
                 "Partition 99 does not exist for topic 'orders-topic'");
+        assertThat(overrideBoundsService.partitionMetadataConsulted).isTrue();
+        assertThat(overrideBoundsService.partitionMetadataTopicName).isEqualTo(TOPIC_NAME);
+        assertThat(overrideBoundsService.partitionMetadataRequestedPartitions).containsExactly(99);
     }
 
     private static CommitOffsetsProcedure newProcedure()
@@ -255,6 +273,21 @@ public class TestCommitOffsetsProcedureValidation
 
             @Override
             public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames) {}
+        };
+    }
+
+    private static ConnectorAccessControl denySelectAccess()
+    {
+        return new ConnectorAccessControl()
+        {
+            @Override
+            public void checkCanExecuteProcedure(ConnectorSecurityContext context, SchemaRoutineName procedure) {}
+
+            @Override
+            public void checkCanSelectFromColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columnNames)
+            {
+                denySelectColumns(tableName.toString(), columnNames);
+            }
         };
     }
 
@@ -337,6 +370,8 @@ public class TestCommitOffsetsProcedureValidation
         private boolean topicDescriptionConsulted;
         private boolean boundsConsulted;
         private boolean partitionMetadataConsulted;
+        private String partitionMetadataTopicName;
+        private Set<Integer> partitionMetadataRequestedPartitions;
         private boolean returnIncompleteBounds;
 
         private TestingOffsetBoundsService()
@@ -373,6 +408,8 @@ public class TestCommitOffsetsProcedureValidation
         public void validatePartitionsExist(ConnectorSession session, String topicName, Set<Integer> requestedPartitions)
         {
             partitionMetadataConsulted = true;
+            partitionMetadataTopicName = topicName;
+            partitionMetadataRequestedPartitions = ImmutableSet.copyOf(requestedPartitions);
             for (int partition : requestedPartitions) {
                 if (partition != 0) {
                     throw new TrinoException(KAFKA_SPLIT_ERROR, "Partition %s does not exist for topic '%s'".formatted(partition, topicName));

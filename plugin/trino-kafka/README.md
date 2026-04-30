@@ -320,12 +320,18 @@ Commit mechanics:
 - broker ACLs may therefore differ from default-mode reads
 - after assignment converges, the procedure pauses assigned partitions and
   commits the requested offsets
+- offset commits use an explicit timeout; close-time `unsubscribe()` or
+  `close()` failures after a successful commit are logged but do not fail the
+  procedure
 
 Validation:
 
-- every requested partition must exist in the connector-visible topic
+- every requested partition must exist in the Kafka topic resolved from the
+  connector table description
 - offsets must be inside `[logStart, logEnd]` unless
   `allow_out_of_range => true`
+- when `allow_out_of_range => true`, the procedure validates partition
+  existence but skips broker beginning/end offset lookups
 - `logEnd` is valid and means the group is caught up
 
 Concurrency:

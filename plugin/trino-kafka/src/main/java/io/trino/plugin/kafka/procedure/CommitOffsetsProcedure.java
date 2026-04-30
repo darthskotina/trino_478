@@ -68,9 +68,10 @@ public class CommitOffsetsProcedure
 {
     private static final Logger log = Logger.get(CommitOffsetsProcedure.class);
     private static final MethodHandle COMMIT_OFFSETS;
-    private static final Duration POLL_TIMEOUT = Duration.ofMillis(100);
+    private static final Duration POLL_TIMEOUT = Duration.ofSeconds(1);
     private static final Duration MAX_WAIT_FOR_ASSIGNMENT = Duration.ofSeconds(30);
-    private static final Duration REJOIN_GRACE_PERIOD = Duration.ofSeconds(2);
+    private static final Duration REJOIN_GRACE_PERIOD = Duration.ofSeconds(5);
+    private static final Duration OFFSET_COMMIT_TIMEOUT = Duration.ofSeconds(30);
     private static final int MAX_REJOIN_ATTEMPTS = 1;
 
     static {
@@ -292,7 +293,7 @@ public class CommitOffsetsProcedure
 
             ImmutableMap.Builder<TopicPartition, OffsetAndMetadata> offsets = ImmutableMap.builder();
             requested.forEach((partition, offset) -> offsets.put(new TopicPartition(topicName, partition), new OffsetAndMetadata(offset)));
-            groupConsumer.commitSync(offsets.buildOrThrow());
+            groupConsumer.commitSync(offsets.buildOrThrow(), OFFSET_COMMIT_TIMEOUT);
         }
         catch (KafkaException e) {
             failure = e;
@@ -323,7 +324,7 @@ public class CommitOffsetsProcedure
             if (consumer.assignment().containsAll(requestedTopicPartitions)) {
                 return;
             }
-            if (rejoinAttempts < MAX_REJOIN_ATTEMPTS && Instant.now().isAfter(rejoinAfter)) {
+            if (rejoinAttempts < MAX_REJOIN_ATTEMPTS && !consumer.assignment().isEmpty() && Instant.now().isAfter(rejoinAfter)) {
                 consumer.enforceRebalance();
                 rejoinAttempts++;
             }
