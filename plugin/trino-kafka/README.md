@@ -334,6 +334,10 @@ Timeout tuning:
   default is `30s`
 - `kafka.commit-offsets-commit-timeout` controls the Kafka offset commit wait;
   default is `30s`
+- Kafka client `request.timeout.ms` from `kafka.config.resources` can still
+  fail the underlying commit request first. Set it lower than
+  `kafka.commit-offsets-commit-timeout` if you want the procedure timeout to be
+  the outer budget and Kafka request failures to surface promptly.
 
 Validation:
 

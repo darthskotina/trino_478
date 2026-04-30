@@ -317,7 +317,7 @@ public class CommitOffsetsProcedure
             throw e;
         }
         finally {
-            closeConsumer(consumer, failure);
+            closeConsumer(consumer, topicName, groupId, failure);
         }
     }
 
@@ -352,7 +352,7 @@ public class CommitOffsetsProcedure
                         NANOSECONDS.toSeconds(maxWaitForAssignment.toNanos())));
     }
 
-    private static void closeConsumer(KafkaConsumer<byte[], byte[]> consumer, Throwable failure)
+    private static void closeConsumer(KafkaConsumer<byte[], byte[]> consumer, String topicName, String groupId, Throwable failure)
     {
         if (consumer == null) {
             return;
@@ -386,7 +386,7 @@ public class CommitOffsetsProcedure
             }
         }
         if (closeFailure != null) {
-            log.warn(closeFailure, "Failed to close Kafka consumer after committing offsets");
+            log.warn(closeFailure, "Failed to close Kafka consumer after committing offsets for group ID '%s' on topic '%s'", groupId, topicName);
         }
     }
 
