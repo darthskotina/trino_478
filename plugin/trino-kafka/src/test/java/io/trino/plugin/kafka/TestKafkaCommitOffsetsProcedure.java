@@ -57,6 +57,7 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 public class TestKafkaCommitOffsetsProcedure
         extends AbstractTestQueryFramework
 {
+    private static final KafkaConfig DEFAULT_KAFKA_CONFIG = new KafkaConfig();
     private static final String DEFAULT_CATALOG = "kafka";
     private static final String EARLIEST_CATALOG = "kafka_earliest";
     private static final String LATEST_CATALOG = "kafka_latest";
@@ -421,7 +422,8 @@ public class TestKafkaCommitOffsetsProcedure
                                 multiPartitionTopic,
                                 groupId),
                         ".*Could not acquire partitions.*another consumer.*");
-                assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(35));
+                assertThat(Duration.ofNanos(System.nanoTime() - start))
+                        .isLessThan(DEFAULT_KAFKA_CONFIG.getCommitOffsetsAssignmentTimeout().toJavaTime().plusSeconds(5));
             }
             finally {
                 running.set(false);

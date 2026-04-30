@@ -22,6 +22,7 @@ import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
 import io.airlift.units.Duration;
+import io.airlift.units.MaxDuration;
 import io.airlift.units.MinDuration;
 import io.trino.plugin.kafka.schema.file.FileTableDescriptionSupplier;
 import io.trino.spi.HostAddress;
@@ -248,6 +249,7 @@ public class KafkaConfig
     }
 
     @MinDuration("1ms")
+    @MaxDuration("5m")
     public Duration getCommitOffsetsAssignmentPollTimeout()
     {
         return commitOffsetsAssignmentPollTimeout;
@@ -262,6 +264,7 @@ public class KafkaConfig
     }
 
     @MinDuration("1ms")
+    @MaxDuration("5m")
     public Duration getCommitOffsetsAssignmentTimeout()
     {
         return commitOffsetsAssignmentTimeout;
@@ -276,6 +279,7 @@ public class KafkaConfig
     }
 
     @MinDuration("1ms")
+    @MaxDuration("5m")
     public Duration getCommitOffsetsCommitTimeout()
     {
         return commitOffsetsCommitTimeout;
