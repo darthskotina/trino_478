@@ -28,6 +28,7 @@ import io.trino.client.StatementClient;
 import io.trino.client.StatementStats;
 import io.trino.plugin.blackhole.BlackHolePlugin;
 import io.trino.plugin.hive.HivePlugin;
+import io.trino.server.security.PasswordAuthenticator;
 import io.trino.server.security.PasswordAuthenticatorManager;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.connector.ConnectorSession;
@@ -203,6 +204,24 @@ public class TestJdbcConnection
             assertThat(connection.getAutoCommit()).isFalse();
             connection.setAutoCommit(true);
             assertThat(connection.getAutoCommit()).isTrue();
+        }
+    }
+
+    @Test
+    public void testPasswordAuthenticationAddsInternalExtraCredentials()
+            throws SQLException
+    {
+        try (Connection connection = createConnection();
+                Statement statement = connection.createStatement();
+                ResultSet rs = statement.executeQuery("SELECT name, value FROM test.extra_credentials")) {
+            ImmutableMap.Builder<String, String> credentials = ImmutableMap.builder();
+            while (rs.next()) {
+                credentials.put(rs.getString("name"), rs.getString("value"));
+            }
+
+            assertThat(credentials.buildOrThrow())
+                    .containsEntry(PasswordAuthenticator.INTERNAL_AUTHENTICATED_USER_CREDENTIAL, TEST_USER)
+                    .containsEntry(PasswordAuthenticator.INTERNAL_AUTHENTICATED_PASSWORD_CREDENTIAL, TEST_PASSWORD);
         }
     }
 

@@ -41,6 +41,7 @@ public class KafkaSplit
     private final Optional<String> messageDataSchemaContents;
     private final int partitionId;
     private final Range messagesRange;
+    private final Optional<KafkaCommittedReadSplitMetadata> committedReadSplitMetadata;
     private final HostAddress leader;
 
     @JsonCreator
@@ -52,6 +53,7 @@ public class KafkaSplit
             @JsonProperty("messageDataSchemaContents") Optional<String> messageDataSchemaContents,
             @JsonProperty("partitionId") int partitionId,
             @JsonProperty("messagesRange") Range messagesRange,
+            @JsonProperty("committedReadSplitMetadata") Optional<KafkaCommittedReadSplitMetadata> committedReadSplitMetadata,
             @JsonProperty("leader") HostAddress leader)
     {
         this.topicName = requireNonNull(topicName, "topicName is null");
@@ -61,6 +63,7 @@ public class KafkaSplit
         this.messageDataSchemaContents = requireNonNull(messageDataSchemaContents, "messageDataSchemaContents is null");
         this.partitionId = partitionId;
         this.messagesRange = requireNonNull(messagesRange, "messagesRange is null");
+        this.committedReadSplitMetadata = requireNonNull(committedReadSplitMetadata, "committedReadSplitMetadata is null");
         this.leader = requireNonNull(leader, "leader is null");
     }
 
@@ -107,6 +110,12 @@ public class KafkaSplit
     }
 
     @JsonProperty
+    public Optional<KafkaCommittedReadSplitMetadata> getCommittedReadSplitMetadata()
+    {
+        return committedReadSplitMetadata;
+    }
+
+    @JsonProperty
     public HostAddress getLeader()
     {
         return leader;
@@ -128,6 +137,7 @@ public class KafkaSplit
                 + sizeOf(keyDataSchemaContents, SizeOf::estimatedSizeOf)
                 + sizeOf(messageDataSchemaContents, SizeOf::estimatedSizeOf)
                 + messagesRange.retainedSizeInBytes()
+                + sizeOf(committedReadSplitMetadata, KafkaCommittedReadSplitMetadata::retainedSizeInBytes)
                 + leader.getRetainedSizeInBytes();
     }
 
@@ -142,6 +152,7 @@ public class KafkaSplit
                 .add("messageDataSchemaContents", messageDataSchemaContents)
                 .add("partitionId", partitionId)
                 .add("messagesRange", messagesRange)
+                .add("committedReadSplitMetadata", committedReadSplitMetadata)
                 .add("leader", leader)
                 .toString();
     }

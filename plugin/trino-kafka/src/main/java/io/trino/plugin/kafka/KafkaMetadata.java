@@ -34,7 +34,9 @@ import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.TableFunctionApplicationResult;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.ComputedStatistics;
 
@@ -70,16 +72,19 @@ public class KafkaMetadata
     private final boolean hideInternalColumns;
     private final TableDescriptionSupplier tableDescriptionSupplier;
     private final KafkaInternalFieldManager kafkaInternalFieldManager;
+    private final KafkaCommittedReadRegistry committedReadRegistry;
 
     @Inject
     public KafkaMetadata(
             KafkaConfig kafkaConfig,
             TableDescriptionSupplier tableDescriptionSupplier,
-            KafkaInternalFieldManager kafkaInternalFieldManager)
+            KafkaInternalFieldManager kafkaInternalFieldManager,
+            KafkaCommittedReadRegistry committedReadRegistry)
     {
         this.hideInternalColumns = kafkaConfig.isHideInternalColumns();
         this.tableDescriptionSupplier = requireNonNull(tableDescriptionSupplier, "tableDescriptionSupplier is null");
         this.kafkaInternalFieldManager = requireNonNull(kafkaInternalFieldManager, "kafkaInternalFieldManager is null");
+        this.committedReadRegistry = requireNonNull(committedReadRegistry, "committedReadRegistry is null");
     }
 
     @Override
@@ -273,9 +278,21 @@ public class KafkaMetadata
         return getTopicDescription(session, schemaTableName).orElseThrow(() -> new TableNotFoundException(schemaTableName));
     }
 
-    private Optional<KafkaTopicDescription> getTopicDescription(ConnectorSession session, SchemaTableName schemaTableName)
+    public Optional<KafkaTopicDescription> getTopicDescription(ConnectorSession session, SchemaTableName schemaTableName)
     {
         return tableDescriptionSupplier.getTopicDescription(session, schemaTableName);
+    }
+
+    @Override
+    public Optional<TableFunctionApplicationResult<ConnectorTableHandle>> applyTableFunction(ConnectorSession session, ConnectorTableFunctionHandle handle)
+    {
+        return Optional.empty();
+    }
+
+    @Override
+    public void cleanupQuery(ConnectorSession session)
+    {
+        committedReadRegistry.cleanupQuery(session.getQueryId());
     }
 
     @Override

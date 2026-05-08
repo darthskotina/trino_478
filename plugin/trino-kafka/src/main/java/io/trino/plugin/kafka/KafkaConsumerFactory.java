@@ -19,12 +19,51 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 
 import java.util.Properties;
 
+import static java.util.Objects.requireNonNull;
+import static org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG;
+
 public interface KafkaConsumerFactory
 {
+    String METADATA_GROUP_ID_PLACEHOLDER = "trino-kafka-metadata";
+
+    Properties baseProperties(ConnectorSession session);
+
+    default Properties configure(ConnectorSession session)
+    {
+        Properties properties = baseProperties(session);
+        properties.setProperty(GROUP_ID_CONFIG, resolveReadPathGroupId(session));
+        return properties;
+    }
+
+    default Properties configureForGroup(ConnectorSession session, String groupId)
+    {
+        requireNonNull(groupId, "groupId is null");
+        Properties properties = baseProperties(session);
+        properties.setProperty(GROUP_ID_CONFIG, groupId);
+        return properties;
+    }
+
+    default Properties configureForMetadata(ConnectorSession session)
+    {
+        Properties properties = baseProperties(session);
+        properties.setProperty(GROUP_ID_CONFIG, METADATA_GROUP_ID_PLACEHOLDER);
+        return properties;
+    }
+
+    String resolveReadPathGroupId(ConnectorSession session);
+
     default KafkaConsumer<byte[], byte[]> create(ConnectorSession session)
     {
         return new KafkaConsumer<>(configure(session));
     }
 
-    Properties configure(ConnectorSession session);
+    default KafkaConsumer<byte[], byte[]> createForGroup(ConnectorSession session, String groupId)
+    {
+        return new KafkaConsumer<>(configureForGroup(session, groupId));
+    }
+
+    default KafkaConsumer<byte[], byte[]> createForMetadata(ConnectorSession session)
+    {
+        return new KafkaConsumer<>(configureForMetadata(session));
+    }
 }

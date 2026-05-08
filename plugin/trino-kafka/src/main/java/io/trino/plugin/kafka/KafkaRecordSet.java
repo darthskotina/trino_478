@@ -30,6 +30,9 @@ import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
@@ -45,10 +48,12 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.decoder.FieldValueProviders.booleanValueProvider;
 import static io.trino.decoder.FieldValueProviders.bytesValueProvider;
 import static io.trino.decoder.FieldValueProviders.longValueProvider;
+import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SPLIT_ERROR;
 import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.lang.Math.max;
+import static java.lang.String.format;
 import static java.util.Collections.emptyIterator;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
@@ -112,8 +117,11 @@ public class KafkaRecordSet
     {
         private final TopicPartition topicPartition;
         private final KafkaConsumer<byte[], byte[]> kafkaConsumer;
+        private final Optional<KafkaCommittedReadSplitMetadata> committedReadSplitMetadata;
         private Iterator<ConsumerRecord<byte[], byte[]>> records = emptyIterator();
         private long completedBytes;
+        private boolean fullyConsumed;
+        private boolean failed;
 
         private final FieldValueProvider[] currentRowValues = new FieldValueProvider[columnHandles.size()];
 
@@ -121,8 +129,10 @@ public class KafkaRecordSet
         {
             topicPartition = new TopicPartition(split.getTopicName(), split.getPartitionId());
             kafkaConsumer = consumerFactory.create(connectorSession);
+            committedReadSplitMetadata = split.getCommittedReadSplitMetadata();
             kafkaConsumer.assign(ImmutableList.of(topicPartition));
             kafkaConsumer.seek(topicPartition, split.getMessagesRange().begin());
+            fullyConsumed = committedReadSplitMetadata.map(KafkaCommittedReadSplitMetadata::checkpointOnly).orElse(false);
         }
 
         @Override
@@ -147,14 +157,29 @@ public class KafkaRecordSet
         @Override
         public boolean advanceNextPosition()
         {
-            if (records.hasNext()) {
-                return nextRow(records.next());
+            try {
+                if (committedReadSplitMetadata.map(KafkaCommittedReadSplitMetadata::checkpointOnly).orElse(false)) {
+                    fullyConsumed = true;
+                    return false;
+                }
+                if (records.hasNext()) {
+                    return nextRow(records.next());
+                }
+                if (kafkaConsumer.position(topicPartition) >= split.getMessagesRange().end()) {
+                    fullyConsumed = true;
+                    return false;
+                }
+                records = kafkaConsumer.poll(Duration.ofMillis(CONSUMER_POLL_TIMEOUT)).iterator();
+                return advanceNextPosition();
             }
-            if (kafkaConsumer.position(topicPartition) >= split.getMessagesRange().end()) {
-                return false;
+            catch (OffsetOutOfRangeException e) {
+                failed = true;
+                throw runtimeOffsetInvalidation(e);
             }
-            records = kafkaConsumer.poll(Duration.ofMillis(CONSUMER_POLL_TIMEOUT)).iterator();
-            return advanceNextPosition();
+            catch (RuntimeException e) {
+                failed = true;
+                throw e;
+            }
         }
 
         private boolean nextRow(ConsumerRecord<byte[], byte[]> message)
@@ -162,6 +187,7 @@ public class KafkaRecordSet
             requireNonNull(message, "message is null");
 
             if (message.offset() >= split.getMessagesRange().end()) {
+                fullyConsumed = true;
                 return false;
             }
 
@@ -259,7 +285,79 @@ public class KafkaRecordSet
         @Override
         public void close()
         {
-            kafkaConsumer.close();
+            RuntimeException failure = null;
+            try {
+                if (committedReadSplitMetadata.isPresent() && shouldCommitCommittedReadOffset(committedReadSplitMetadata.orElseThrow())) {
+                    commitCommittedReadOffset(committedReadSplitMetadata.orElseThrow());
+                }
+            }
+            catch (RuntimeException e) {
+                failure = e;
+            }
+
+            try {
+                kafkaConsumer.close();
+            }
+            catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                }
+                else {
+                    failure.addSuppressed(e);
+                }
+            }
+
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        private boolean shouldCommitCommittedReadOffset(KafkaCommittedReadSplitMetadata committedReadMetadata)
+        {
+            if (failed || Thread.currentThread().isInterrupted()) {
+                return false;
+            }
+            if (committedReadMetadata.checkpointOnly()) {
+                return true;
+            }
+            if (!fullyConsumed) {
+                return false;
+            }
+            // Committed-read mode intentionally advances to the planned split end, which may be
+            // a capped batch boundary rather than the broker snapshot end observed during planning.
+            return kafkaConsumer.position(topicPartition) >= split.getMessagesRange().end();
+        }
+
+        private void commitCommittedReadOffset(KafkaCommittedReadSplitMetadata committedReadMetadata)
+        {
+            try {
+                kafkaConsumer.commitSync(Map.of(topicPartition, new OffsetAndMetadata(committedReadMetadata.commitTarget())));
+            }
+            catch (KafkaException e) {
+                throw new io.trino.spi.TrinoException(
+                        KAFKA_SPLIT_ERROR,
+                        format(
+                                "Failed to commit Kafka offset %s for topic '%s' partition %s and group ID '%s'",
+                                committedReadMetadata.commitTarget(),
+                                split.getTopicName(),
+                                split.getPartitionId(),
+                                committedReadMetadata.groupId()),
+                        e);
+            }
+        }
+
+        private io.trino.spi.TrinoException runtimeOffsetInvalidation(OffsetOutOfRangeException e)
+        {
+            String groupId = committedReadSplitMetadata.map(KafkaCommittedReadSplitMetadata::groupId).orElse("unknown");
+            return new io.trino.spi.TrinoException(
+                    KAFKA_SPLIT_ERROR,
+                    format(
+                            "Kafka offset %s for topic '%s' partition %s and group ID '%s' became invalid during execution",
+                            split.getMessagesRange().begin(),
+                            split.getTopicName(),
+                            split.getPartitionId(),
+                            groupId),
+                    e);
         }
     }
 
