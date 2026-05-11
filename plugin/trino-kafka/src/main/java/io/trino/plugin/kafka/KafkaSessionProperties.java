@@ -35,6 +35,7 @@ public final class KafkaSessionProperties
     private static final String ENFORCE_READ_SCOPE = "enforce_read_scope";
     private static final String COMMITTED_READ_ENABLED = "committed_read_enabled";
     private static final String CONSUMER_GROUP_ID = "consumer_group_id";
+    private static final String CLIENT_RACK = "client_rack";
     private static final String COMMITTED_READ_ALLOW_OFFSET_REWIND = "committed_read_allow_offset_rewind";
     private static final String COMMITTED_READ_MAX_ROWS_PER_PARTITION = "committed_read_max_rows_per_partition";
     private final List<PropertyMetadata<?>> sessionProperties;
@@ -65,6 +66,11 @@ public final class KafkaSessionProperties
                                 throw new TrinoException(INVALID_SESSION_PROPERTY, format("Session property '%s' must not be blank", CONSUMER_GROUP_ID));
                             }
                         },
+                        false),
+                stringProperty(
+                        CLIENT_RACK,
+                        "Kafka consumer client.rack value. Supported values: am1 for NL, am2 for AGS, ld7 for LD. Empty string disables client.rack for the session.",
+                        "am1",
                         false),
                 PropertyMetadata.booleanProperty(
                         COMMITTED_READ_ALLOW_OFFSET_REWIND,
@@ -114,6 +120,11 @@ public final class KafkaSessionProperties
     public static Optional<String> getConsumerGroupIdSessionProperty(ConnectorSession session)
     {
         return Optional.ofNullable(session.getProperty(CONSUMER_GROUP_ID, String.class));
+    }
+
+    public static Optional<String> getClientRack(ConnectorSession session)
+    {
+        return Optional.ofNullable(session.getProperty(CLIENT_RACK, String.class));
     }
 
     public static boolean isCommittedReadAllowOffsetRewind(ConnectorSession session)

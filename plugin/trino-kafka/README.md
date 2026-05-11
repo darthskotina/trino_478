@@ -40,6 +40,10 @@ Session properties used by committed-read mode:
 - `committed_read_allow_offset_rewind`
 - `committed_read_max_rows_per_partition`
 
+General Kafka session properties:
+
+- `client_rack`
+
 Legacy compatibility property:
 
 - `kafka.consumer-group-id`
@@ -51,6 +55,12 @@ Compatibility rules:
   consumer construction
 - `kafka.consumer-group-id` is never used as a fallback committed-read group
 - `consumer_group_id` is required when committed-read mode reads run
+- `client_rack` maps to Kafka consumer `client.rack`, defaults to `am1`, and
+  supports `am1` for NL, `am2` for AGS, and `ld7` for LD
+- `client_rack` overrides `client.rack` from `kafka.config.resources` for
+  consumers only
+- blank `client_rack` removes `client.rack` from consumer properties for that
+  session
 
 ## Effective Settings
 
@@ -86,6 +96,13 @@ SET SESSION kafka.consumer_group_id = 'svc-orders-main';
 
 SELECT *
 FROM kafka.default.orders_topic;
+```
+
+Consumer rack example:
+
+```sql
+SET SESSION kafka.client_rack = 'ld7';
+SET SESSION kafka.client_rack = '';
 ```
 
 To use a different committed-read group ID for another workload in the same

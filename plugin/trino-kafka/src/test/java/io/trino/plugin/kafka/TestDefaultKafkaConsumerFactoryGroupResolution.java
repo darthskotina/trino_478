@@ -17,12 +17,17 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
+import static org.apache.kafka.clients.consumer.ConsumerConfig.CLIENT_RACK_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -110,6 +115,104 @@ public class TestDefaultKafkaConsumerFactoryGroupResolution
         assertThat(committedReadProperties).doesNotContainKey(GROUP_ID_CONFIG);
     }
 
+    @Test
+    public void testDefaultClientRackAppliesToAllConsumerFactoryPaths()
+            throws Exception
+    {
+        KafkaConfig config = config();
+        DefaultKafkaConsumerFactory factory = new DefaultKafkaConsumerFactory(config);
+        ConnectorSession session = session(config, false, null);
+
+        assertThat(factory.baseProperties(session)).containsEntry(CLIENT_RACK_CONFIG, "am1");
+        assertThat(factory.configure(session)).containsEntry(CLIENT_RACK_CONFIG, "am1");
+        assertThat(factory.configureForGroup(session, "explicit-group")).containsEntry(CLIENT_RACK_CONFIG, "am1");
+        assertThat(factory.configureForMetadata(session)).containsEntry(CLIENT_RACK_CONFIG, "am1");
+    }
+
+    @Test
+    public void testSessionClientRackAppliesToAllConsumerFactoryPaths()
+            throws Exception
+    {
+        KafkaConfig config = config();
+        DefaultKafkaConsumerFactory factory = new DefaultKafkaConsumerFactory(config);
+        ConnectorSession session = session(config, false, null, "rack-a");
+
+        assertThat(factory.baseProperties(session)).containsEntry(CLIENT_RACK_CONFIG, "rack-a");
+        assertThat(factory.configure(session)).containsEntry(CLIENT_RACK_CONFIG, "rack-a");
+        assertThat(factory.configureForGroup(session, "explicit-group")).containsEntry(CLIENT_RACK_CONFIG, "rack-a");
+        assertThat(factory.configureForMetadata(session)).containsEntry(CLIENT_RACK_CONFIG, "rack-a");
+    }
+
+    @Test
+    public void testDefaultClientRackOverridesResourceConfig(@TempDir Path tempDir)
+            throws Exception
+    {
+        KafkaConfig config = configWithClientRackResource(tempDir, "rack-from-file");
+
+        Properties properties = new DefaultKafkaConsumerFactory(config).baseProperties(session(config, false, null));
+
+        assertThat(properties).containsEntry(CLIENT_RACK_CONFIG, "am1");
+    }
+
+    @Test
+    public void testSessionClientRackOverridesResourceConfig(@TempDir Path tempDir)
+            throws Exception
+    {
+        KafkaConfig config = configWithClientRackResource(tempDir, "rack-from-file");
+
+        Properties properties = new DefaultKafkaConsumerFactory(config).baseProperties(session(config, false, null, "rack-from-session"));
+
+        assertThat(properties).containsEntry(CLIENT_RACK_CONFIG, "rack-from-session");
+    }
+
+    @Test
+    public void testBlankSessionClientRackRemovesResourceConfig(@TempDir Path tempDir)
+            throws Exception
+    {
+        KafkaConfig config = configWithClientRackResource(tempDir, "rack-from-file");
+
+        Properties properties = new DefaultKafkaConsumerFactory(config).baseProperties(session(config, false, null, ""));
+
+        assertThat(properties).doesNotContainKey(CLIENT_RACK_CONFIG);
+    }
+
+    @Test
+    public void testWhitespaceSessionClientRackRemovesResourceConfig(@TempDir Path tempDir)
+            throws Exception
+    {
+        KafkaConfig config = configWithClientRackResource(tempDir, "rack-from-file");
+
+        Properties properties = new DefaultKafkaConsumerFactory(config).baseProperties(session(config, false, null, "   "));
+
+        assertThat(properties).doesNotContainKey(CLIENT_RACK_CONFIG);
+    }
+
+    @Test
+    public void testSessionClientRackDoesNotOverrideAdminOrProducerResourceConfig(@TempDir Path tempDir)
+            throws Exception
+    {
+        KafkaConfig config = configWithClientRackResource(tempDir, "rack-from-file");
+
+        Properties adminProperties = new DefaultKafkaAdminFactory(config).configure(session(config, false, null, "rack-from-session"));
+        Properties producerProperties = new DefaultKafkaProducerFactory(config).configure(session(config, false, null, "rack-from-session"));
+
+        assertThat(adminProperties).containsEntry(CLIENT_RACK_CONFIG, "rack-from-file");
+        assertThat(producerProperties).containsEntry(CLIENT_RACK_CONFIG, "rack-from-file");
+    }
+
+    @Test
+    public void testBlankSessionClientRackDoesNotRemoveAdminOrProducerResourceConfig(@TempDir Path tempDir)
+            throws Exception
+    {
+        KafkaConfig config = configWithClientRackResource(tempDir, "rack-from-file");
+
+        Properties adminProperties = new DefaultKafkaAdminFactory(config).configure(session(config, false, null, ""));
+        Properties producerProperties = new DefaultKafkaProducerFactory(config).configure(session(config, false, null, ""));
+
+        assertThat(adminProperties).containsEntry(CLIENT_RACK_CONFIG, "rack-from-file");
+        assertThat(producerProperties).containsEntry(CLIENT_RACK_CONFIG, "rack-from-file");
+    }
+
     private static KafkaConfig config()
     {
         return new KafkaConfig()
@@ -117,12 +220,29 @@ public class TestDefaultKafkaConsumerFactoryGroupResolution
                 .setConsumerGroupId("catalog-group");
     }
 
+    private static KafkaConfig configWithClientRackResource(Path tempDir, String clientRack)
+            throws Exception
+    {
+        Path resourceConfig = tempDir.resolve("kafka-client.properties");
+        Files.writeString(resourceConfig, CLIENT_RACK_CONFIG + "=" + clientRack + "\n");
+        return config()
+                .setResourceConfigFiles(List.of(resourceConfig.toString()));
+    }
+
     private static ConnectorSession session(KafkaConfig config, boolean committedReadEnabled, String consumerGroupId)
+    {
+        return session(config, committedReadEnabled, consumerGroupId, null);
+    }
+
+    private static ConnectorSession session(KafkaConfig config, boolean committedReadEnabled, String consumerGroupId, String clientRack)
     {
         Map<String, Object> propertyValues = new HashMap<>();
         propertyValues.put("committed_read_enabled", committedReadEnabled);
         if (consumerGroupId != null) {
             propertyValues.put("consumer_group_id", consumerGroupId);
+        }
+        if (clientRack != null) {
+            propertyValues.put("client_rack", clientRack);
         }
         return TestingConnectorSession.builder()
                 .setPropertyMetadata(new KafkaSessionProperties(config).getSessionProperties())

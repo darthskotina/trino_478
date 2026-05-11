@@ -218,6 +218,27 @@ Kafka uses `https` as default. Use `disabled` to disable server host name valida
 
 This property is optional; default is `https`.
 
+## Session properties
+
+The following Kafka connector session properties are available:
+
+| Property name | Description |
+| ------------- | ----------- |
+| `client_rack` | Kafka consumer `client.rack` value. Defaults to `am1`. Supported values are `am1` for NL, `am2` for AGS, and `ld7` for LD. |
+
+The `client_rack` session property applies only to Kafka consumers created by
+the connector. It overrides any `client.rack` value loaded from
+`kafka.config.resources` for consumer clients. Set it to an empty string to
+remove `client.rack` from consumer properties for the session, including a value
+inherited from `kafka.config.resources`.
+
+For example, for a Kafka catalog named `kafka`:
+
+```sql
+SET SESSION kafka.client_rack = 'ld7';
+SET SESSION kafka.client_rack = '';
+```
+
 ## Internal columns
 
 The internal column prefix is configurable by `kafka.internal-column-prefix`

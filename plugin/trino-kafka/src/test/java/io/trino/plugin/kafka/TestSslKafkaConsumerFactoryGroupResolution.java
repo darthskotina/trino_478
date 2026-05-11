@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Properties;
 
 import static org.apache.kafka.clients.CommonClientConfigs.SECURITY_PROTOCOL_CONFIG;
+import static org.apache.kafka.clients.consumer.ConsumerConfig.CLIENT_RACK_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
@@ -38,7 +39,9 @@ public class TestSslKafkaConsumerFactoryGroupResolution
                 .setConsumerGroupId("catalog-group");
         ConnectorSession session = TestingConnectorSession.builder()
                 .setPropertyMetadata(new KafkaSessionProperties(kafkaConfig).getSessionProperties())
-                .setPropertyValues(Map.of("committed_read_enabled", false))
+                .setPropertyValues(Map.of(
+                        "committed_read_enabled", false,
+                        "client_rack", "rack-ssl"))
                 .build();
         KafkaSslConfig sslConfig = new KafkaSslConfig()
                 .setTruststoreLocation("/some/path/to/truststore")
@@ -58,11 +61,20 @@ public class TestSslKafkaConsumerFactoryGroupResolution
         assertThat(read.getProperty(GROUP_ID_CONFIG)).isEqualTo("catalog-group");
         assertThat(group.getProperty(GROUP_ID_CONFIG)).isEqualTo("explicit-group");
         assertThat(metadata.getProperty(GROUP_ID_CONFIG)).isEqualTo(KafkaConsumerFactory.METADATA_GROUP_ID_PLACEHOLDER);
+        assertClientRack(base);
+        assertClientRack(read);
+        assertClientRack(group);
+        assertClientRack(metadata);
     }
 
     private static void assertSslProperties(Properties properties)
     {
         assertThat(properties).containsEntry(SSL_TRUSTSTORE_LOCATION_CONFIG, "/some/path/to/truststore");
         assertThat(properties).containsEntry(SECURITY_PROTOCOL_CONFIG, SSL.name());
+    }
+
+    private static void assertClientRack(Properties properties)
+    {
+        assertThat(properties).containsEntry(CLIENT_RACK_CONFIG, "rack-ssl");
     }
 }

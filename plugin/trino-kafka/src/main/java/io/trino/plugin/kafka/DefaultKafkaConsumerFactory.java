@@ -26,6 +26,7 @@ import java.util.Set;
 import static io.trino.plugin.kafka.utils.PropertiesUtils.readProperties;
 import static java.util.stream.Collectors.joining;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG;
+import static org.apache.kafka.clients.consumer.ConsumerConfig.CLIENT_RACK_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.RECEIVE_BUFFER_CONFIG;
@@ -61,6 +62,15 @@ public class DefaultKafkaConsumerFactory
         properties.setProperty(VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         properties.setProperty(ENABLE_AUTO_COMMIT_CONFIG, Boolean.toString(false));
         properties.setProperty(RECEIVE_BUFFER_CONFIG, Long.toString(kafkaBufferSize.toBytes()));
+        KafkaSessionProperties.getClientRack(session)
+                .ifPresent(clientRack -> {
+                    if (clientRack.isBlank()) {
+                        properties.remove(CLIENT_RACK_CONFIG);
+                    }
+                    else {
+                        properties.setProperty(CLIENT_RACK_CONFIG, clientRack);
+                    }
+                });
 
         return properties;
     }
